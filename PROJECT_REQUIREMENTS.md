@@ -8,30 +8,15 @@ Tracks schema, API contracts, and frontend spec. Update as the ML pipeline matur
 
 | Area | Status |
 |---|---|
-| Firestore Schema | Draft |
-| Enums | Draft |
-| Cloud Functions | Draft |
-| Frontend Pages | Draft |
+| DB Schema (SQLite) | Done |
+| Enums | Done |
+| FastAPI Backend | Done (stubs) |
+| Next.js Frontend | Done (shell) |
+| Worker Identification — POV | Not started |
+| Worker Identification — Wall Cam | Not started |
+| Object Permanence (Wall Cam) | Not started |
 | ML Pipeline (POV) | Not started |
 | ML Pipeline (Wall Cam) | Not started |
-| Worker Re-ID / Object Permanence | Not started |
-
----
-
-## Firebase Project
-
-```
-Project ID:     ironsite-hackathon
-Auth Domain:    ironsite-hackathon.firebaseapp.com
-Storage Bucket: ironsite-hackathon.firebasestorage.app
-App ID:         1:1616514847:web:a8f51c3c4227a514242a2a
-```
-
-**Services used:**
-- Firestore — primary database (workers, shifts, events)
-- Firebase Storage — video uploads and extracted clips
-- Cloud Functions — ML pipeline ingest endpoints, report generation
-- Analytics — already initialized
 
 ---
 
@@ -39,33 +24,53 @@ App ID:         1:1616514847:web:a8f51c3c4227a514242a2a
 
 | Layer | Choice |
 |---|---|
-| Database | Firestore |
-| File Storage | Firebase Storage |
-| Backend Logic | Cloud Functions (Python or Node.js) |
-| ML Pipeline | Python scripts → calls Cloud Functions to write events |
-| Frontend | Next.js + Tailwind |
-| Firebase SDK | firebase-js-sdk (web) |
+| Database | SQLite via SQLAlchemy (`backend/data/ironsite.db`) |
+| Backend | FastAPI + Uvicorn, running in Docker |
+| ML Pipeline | Python — added to `backend/main.py` as pipelines are built |
+| Frontend | Next.js + Tailwind (`/code`) |
+| Frontend → Backend | `fetch` via `code/lib/api.ts` → `http://localhost:8000` |
+
+**Local ports:**
+```
+Next.js frontend   →  http://localhost:3000   (bun dev)
+FastAPI backend    →  http://localhost:8000   (docker compose up)
+```
+
+No cloud credentials required. Clone and run.
+
+---
+
+## Running
+
+```bash
+# Terminal 1
+cd backend && docker compose up
+
+# Terminal 2
+cp code/.env.example code/.env.local   # first time only
+cd code && bun dev
+```
 
 ---
 
 ## Enums
 
-Stored as string literals in Firestore documents.
+Defined in `backend/database.py` as Python enums, stored as strings in SQLite.
 
 ### `CameraSource`
 ```
-POV         # body-worn camera, musculoskeletal/posture pipeline
-WALL_CAM    # fixed mounted camera, spatial/behavioral pipeline
+POV         # body-worn camera → musculoskeletal/posture pipeline
+WALL_CAM    # fixed mounted camera → spatial/behavioral pipeline
 ```
 
 ### `EventCategory`
 ```
 VIOLATION   # unsafe behavior or posture detected
-COMPLIANT   # confirmed safe behavior (good practice logging)
+COMPLIANT   # confirmed safe behavior
 ```
 
 ### `ViolationType`
-TBD as ML pipeline is built — starting set:
+Stored as plain string in `safety_events.violation_type`. TBD as ML pipeline is built — starting set:
 ```
 # Wall cam
 FALL_PROTECTION_MISSING
@@ -88,254 +93,215 @@ COMPLIANT_BEHAVIOR
 
 ### `Severity`
 ```
-LOW
-MEDIUM
-HIGH
-CRITICAL
+LOW | MEDIUM | HIGH | CRITICAL
 ```
 
 ### `WorkerStatus`
 ```
-ACTIVE
-INACTIVE
+ACTIVE | INACTIVE
 ```
 
 ### `ShiftStatus`
 ```
-IN_PROGRESS
-COMPLETED
+IN_PROGRESS | COMPLETED
 ```
 
 ---
 
-## Firestore Schema
+## Database Schema
 
-### Collection: `sites`
+Defined in `backend/database.py`. SQLite file lives at `backend/data/ironsite.db` (Docker volume, persists between restarts).
 
+### `sites`
 ```
-sites/{siteId}
-├── name:        string
-├── location:    string
-└── createdAt:   timestamp
-```
-
----
-
-### Collection: `workers`
-
-Persistent worker identity. One document per worker, survives across shifts and days.
-
-```
-workers/{workerId}
-├── siteId:         string (ref → sites)
-├── displayName:    string | null
-├── embedding:      string | null   # base64 or Storage path — for re-ID
-├── status:         WorkerStatus
-├── createdAt:      timestamp
-└── stats:          map             # denormalized, updated on event write
-    ├── totalViolations:    number
-    ├── totalCompliant:     number
-    └── avgMsdRisk:         number  # rolling average from POV shifts
+id           TEXT  PK
+name         TEXT
+location     TEXT
+created_at   DATETIME
 ```
 
-> `embedding` may move to Firebase Storage if size is a concern. The `stats` map is denormalized so the dashboard can read worker cards without aggregating events.
-
----
-
-### Collection: `shifts`
-
-One document per worker per day.
-
+### `devices`
+Maps physical POV camera units to a site. The per-shift worker binding is on `shifts.pov_device_id`.
 ```
-shifts/{shiftId}
-├── workerId:         string (ref → workers)
-├── siteId:           string (ref → sites)
-├── date:             string          # "YYYY-MM-DD"
-├── startedAt:        timestamp
-├── endedAt:          timestamp | null
-├── status:           ShiftStatus
-├── msdRiskScore:     number | null   # 0.0–1.0, set when POV processing completes
-├── violationCount:   number          # updated on each event write
-└── compliantCount:   number          # updated on each event write
+id           TEXT  PK
+label        TEXT              # e.g. "Cam-03"
+site_id      TEXT  FK → sites
+created_at   DATETIME
 ```
 
----
-
-### Collection: `safetyEvents`
-
-Core event log. One document per flagged moment from either pipeline.
-
+### `workers`
+Persistent worker identity. Survives across shifts and days.
 ```
-safetyEvents/{eventId}
-├── shiftId:          string (ref → shifts)
-├── workerId:         string (ref → workers)
-├── cameraSource:     CameraSource
-├── eventCategory:    EventCategory
-├── violationType:    ViolationType
-├── severity:         Severity | null   # null for COMPLIANT events
-├── videoTimestamp:   number            # seconds into source video
-├── clipPath:         string | null     # Firebase Storage path to extracted clip
-└── metadata:         map | null        # pipeline-specific extras
-    # wall cam examples:
-    #   confidence: 0.91
-    #   zone: "scaffold_level_2"
-    # pov examples:
-    #   jointAngles: { spine: 47, knee: 12 }
-    #   riskContribution: 0.34
-└── createdAt:        timestamp
+id                    TEXT  PK
+site_id               TEXT  FK → sites
+display_name          TEXT  nullable
+appearance_embedding  TEXT  nullable   # base64 — wall-cam re-ID
+face_embedding        TEXT  nullable   # base64 — optional face recognition
+status                TEXT             # WorkerStatus enum
+created_at            DATETIME
+last_seen_at          DATETIME  nullable
+total_violations      INT  default 0   # denormalized
+total_compliant       INT  default 0   # denormalized
+avg_msd_risk          FLOAT  default 0.0  # rolling avg from POV shifts
 ```
 
-**Indexes needed:**
-- `workerId` + `createdAt` — worker history queries
-- `shiftId` + `eventCategory` — shift report breakdown
-- `siteId` + `date` (via shift join) — daily site reports
-
----
-
-## Cloud Functions
-
-These are the backend callable surfaces. ML pipeline Python scripts call the HTTP functions to write data. The frontend calls Firestore SDK directly for most reads.
-
----
-
-### `registerWorker` — HTTP POST
-Called by the re-ID module when a new worker is detected for the first time.
-
-Request:
-```json
-{
-  "siteId": "string",
-  "displayName": "string | null",
-  "embedding": "base64 string"
-}
+### `shifts`
+One row per worker per day.
+```
+id               TEXT  PK
+worker_id        TEXT  FK → workers
+site_id          TEXT  FK → sites
+date             TEXT              # "YYYY-MM-DD"
+started_at       DATETIME
+ended_at         DATETIME  nullable
+status           TEXT              # ShiftStatus enum
+pov_device_id    TEXT  FK → devices  nullable  # which POV cam this worker wore today
+msd_risk_score   FLOAT  nullable   # set when POV processing completes
+violation_count  INT  default 0    # updated on each event write
+compliant_count  INT  default 0    # updated on each event write
 ```
 
-Response:
-```json
-{ "workerId": "string" }
+### `safety_events`
+Core event log. One row per flagged moment from either pipeline.
+```
+id               TEXT  PK
+shift_id         TEXT  FK → shifts
+worker_id        TEXT  FK → workers
+camera_source    TEXT              # CameraSource enum
+event_category   TEXT              # EventCategory enum
+violation_type   TEXT  nullable    # ViolationType string
+severity         TEXT  nullable    # Severity enum, null for COMPLIANT
+video_timestamp  FLOAT             # seconds into source video
+clip_path        TEXT  nullable    # local path to extracted clip
+metadata_json    TEXT  nullable    # JSON blob for pipeline-specific extras
+created_at       DATETIME
 ```
 
 ---
 
-### `openShift` — HTTP POST
-Called at start of processing for a given worker+day.
+## Worker Identification & Tagging
 
-Request:
-```json
-{
-  "workerId": "string",
-  "siteId": "string",
-  "date": "YYYY-MM-DD"
-}
+### POV — Device-to-Worker Binding
+
+The camera is worn by one worker. Identity problem: which worker is wearing which camera today?
+
+**Flow:**
+1. Worker checks in via dashboard → selects their name + POV device label
+2. `POST /workers/checkin` creates a shift with `pov_device_id` set
+3. POV pipeline receives video labeled with device ID → queries `GET /devices?site_id=` to resolve `device_id → worker_id + shift_id`
+4. All events from that video are tagged against that worker
+
+### Wall Cam — Appearance-Based Re-ID + Object Permanence
+
+Multiple workers visible simultaneously, none pre-labeled.
+
+**At video start:**
+- `GET /workers?site_id=` fetches all known workers with embeddings → seeds local in-memory registry
+- All matching is done in-memory (cosine similarity) — no per-frame DB calls
+
+**Per detection:**
+```
+Bounding box crop → re-ID encoder → embedding
+        │
+        ├── similarity > threshold → existing worker_id
+        └── no match → temp ID → POST /workers/register at end of video
 ```
 
-Response:
-```json
-{ "shiftId": "string" }
-```
+**Object permanence:**
+- When a track disappears, hold last known state in memory (worker_id + embedding + position)
+- On reappearance: re-ID check against held state → re-assign same worker_id if match
+- Time window TBD (~5–10 min before giving up on a lost track)
+
+**DB is read once at video start, written once at video end** — no per-frame Firestore/DB calls.
 
 ---
 
-### `closeShift` — HTTP POST
-Called when all video for a shift has been processed.
+## API Endpoints
 
-Request:
-```json
-{
-  "shiftId": "string",
-  "msdRiskScore": "number | null"
-}
+FastAPI at `http://localhost:8000`. Defined in `backend/main.py`.
+
+### Health
+```
+GET  /health
+→ { "status": "ok" }
 ```
 
-Sets `status: COMPLETED`, writes `endedAt`, sets `msdRiskScore`.
-
----
-
-### `ingestEvent` — HTTP POST
-Called by ML pipeline scripts (POV or wall-cam) to write a single safety event.
-
-Request:
-```json
-{
-  "shiftId": "string",
-  "workerId": "string",
-  "cameraSource": "POV | WALL_CAM",
-  "eventCategory": "VIOLATION | COMPLIANT",
-  "violationType": "string",
-  "severity": "string | null",
-  "videoTimestamp": 142.5,
-  "clipPath": "storage/path/to/clip.mp4 | null",
-  "metadata": {}
-}
+### Sites
+```
+POST /sites               create a site
+GET  /sites               list all sites
 ```
 
-Side effects:
-- Writes to `safetyEvents`
-- Increments `violationCount` or `compliantCount` on the parent shift
-- Updates `workers/{workerId}/stats`
-
-Response:
-```json
-{ "eventId": "string" }
+### Devices
+```
+POST /devices             register a POV device
+GET  /devices?site_id=    list devices for a site
 ```
 
----
+### Workers
+```
+POST /workers/register    register new worker (called by wall-cam re-ID)
+POST /workers/checkin     link worker to POV device, open shift
+GET  /workers?site_id=    list workers (also seeds wall-cam re-ID registry)
+GET  /workers/{id}        get single worker with stats
+```
 
-### `processVideoUpload` — Storage Trigger
-Fires automatically when a video is uploaded to Storage.
+### Shifts
+```
+GET   /shifts/{id}          get shift + all its events
+PATCH /shifts/{id}/close    mark completed, set msd_risk_score
+```
 
-Trigger path: `uploads/{siteId}/{type}/{filename}`
-- `type` is `pov` or `wall-cam`
+### Events
+```
+POST /events/ingest         write a safety event (called by ML pipeline)
+GET  /events                list events, filterable by worker_id / shift_id / event_category
+```
 
-Behavior:
-- Kicks off the appropriate ML pipeline (TBD — likely a Cloud Run job or Pub/Sub message)
-- Creates a processing job record
-
----
-
-### `getShiftReport` — HTTP GET (or Firestore client-side)
-Assembles the end-of-day report for a shift. Can be done client-side with two Firestore reads (shift doc + events query) — only needs to be a Cloud Function if report generation becomes expensive.
+### Video Processing
+```
+POST /process/pov           submit POV video → starts processing job
+POST /process/wall-cam      submit wall-cam video → starts processing job
+GET  /jobs/{job_id}         poll job status
+```
 
 ---
 
 ## Frontend Pages
 
+Defined in `code/app/`. All data via `code/lib/api.ts` → `http://localhost:8000`.
+
 ### `/` — Site Dashboard
-- Per-worker cards: name/ID, today's shift status, violation count, risk score badge
-- Top violations of the day (aggregated across all workers)
-- Site heatmap placeholder (wall-cam spatial output, TBD)
-- Filter by date
+- Per-worker cards: name, violations today, MSD score
+- Top violations of the day
+- Backend connection status indicator
 
 ### `/workers` — Worker Registry
-- Table: display name, ID, status, lifetime violations, last active
-- Sort by violation count, filter by status
+- Table: name, status, lifetime violations, last seen
 
 ### `/workers/[workerId]` — Worker Detail
-- Identity card: name, ID, first seen, current status
-- Shift history table: date, violations, compliant count, MSD score
-- Lifetime violation breakdown by type (bar chart)
-- MSD risk trend over time (line chart, POV data)
+- Identity card + stats
+- Shift history table
+- Violation breakdown by type
+- MSD risk trend over time
 
 ### `/shifts/[shiftId]` — Shift Report
 - Summary: date, worker, duration, MSD score
-- Violation log: timestamped, type, severity, camera source, clip preview
+- Violation log: timestamped, type, severity, camera source
 - Compliant behavior log
-- Source breakdown: how many events from POV vs. wall cam
+- POV vs. wall-cam event breakdown
 
 ### `/ingest` — Video Upload
-- Upload form: POV or wall-cam toggle, file picker, worker/site assignment
-- Recent uploads list with processing status (polling Storage trigger job state)
-- Error display for failed jobs
+- Upload form: POV or wall-cam, file picker, worker/device/site fields
+- Recent jobs list with status polling
 
 ---
 
 ## Open Items
 
-- [ ] Finalize `ViolationType` enum once ML pipeline is scoped
-- [ ] Decide: embedding stored in Firestore doc (base64) or Firebase Storage path
-- [ ] Decide: `getShiftReport` as Cloud Function or assembled client-side
-- [ ] Define Storage folder structure for raw uploads vs. extracted clips
-- [ ] Firestore security rules (open for hackathon, lock down after)
-- [ ] Auth — any login needed for hackathon scope?
+- [ ] Finalize `ViolationType` values once ML pipeline is scoped
+- [ ] Choose re-ID model for wall-cam (OSNet / torchreid) and fix embedding dimensions
+- [ ] Tune cosine similarity threshold (~0.75 starting point) in wall-cam pipeline
+- [ ] Define object permanence time window for lost tracks
 - [ ] Site heatmap data format (zones, coordinate system)
-- [ ] Cloud Run vs. direct Python execution for ML pipeline jobs
+- [ ] `clip_path` — local filesystem path for now, define folder structure
