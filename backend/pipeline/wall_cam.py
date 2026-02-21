@@ -1,13 +1,14 @@
-import cv2
 import json
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import av
+from PIL import Image
 from ultralytics import YOLO
 
 # ---------------------------------------------------------------------------
-# Class mappings (from notebook)
+# Class mappings
 # ---------------------------------------------------------------------------
 
 CONSTRUCTION_HAZARD_CLASSES = {
@@ -91,7 +92,6 @@ HAZARD_RULES = {
 
 MODEL_PATH = Path(__file__).parent.parent / "models" / "yolo11s_construction.pt"
 
-# Singleton — loaded once per process
 _model: Optional[YOLO] = None
 
 
@@ -159,7 +159,6 @@ def _detect_hazards(detections: List[Dict], proximity_threshold: float = 0.3) ->
 
     for hazard_name, rule in HAZARD_RULES.items():
         required = rule["requires"]
-
         if len(required) == 2:
             req1, req2 = required
             req1_dets = []
@@ -169,7 +168,6 @@ def _detect_hazards(detections: List[Dict], proximity_threshold: float = 0.3) ->
             else:
                 req1_dets = by_class.get(req1, [])
             req2_dets = by_class.get(req2, []) if isinstance(req2, str) else []
-
             for d1 in req1_dets:
                 for d2 in req2_dets:
                     dist = _proximity(d1["bbox"], d2["bbox"])
@@ -185,7 +183,6 @@ def _detect_hazards(detections: List[Dict], proximity_threshold: float = 0.3) ->
                             ],
                             "proximity": round(dist, 4),
                         })
-
         elif len(required) == 1:
             req = required[0]
             classes = req if isinstance(req, list) else [req]
@@ -205,30 +202,31 @@ def _detect_hazards(detections: List[Dict], proximity_threshold: float = 0.3) ->
 
 
 def _save_person_crops(
-    frame: np.ndarray,
+    img: Image.Image,
     detections: List[Dict],
     frame_idx: int,
     crops_dir: Path,
     pad: float = 0.25,
 ) -> List[Dict]:
-    h, w = frame.shape[:2]
+    w, h = img.size
     crops = []
-    for i, det in enumerate(d for d in detections if d["class_name"] == "person"):
-        x1, y1, x2, y2 = det["bbox"]
+    persons = [d for d in detections if d["class_name"] == "person"]
+    for i, person in enumerate(persons):
+        x1, y1, x2, y2 = person["bbox"]
         bw, bh = x2 - x1, y2 - y1
         px1 = max(0, int(x1 - pad * bw))
         py1 = max(0, int(y1 - pad * bh))
         px2 = min(w, int(x2 + pad * bw))
         py2 = min(h, int(y2 + pad * bh))
-        crop = frame[py1:py2, px1:px2]
+        crop = img.crop((px1, py1, px2, py2))
         crop_name = f"frame_{frame_idx:06d}_person_{i}.jpg"
-        cv2.imwrite(str(crops_dir / crop_name), crop)
+        crop.save(str(crops_dir / crop_name), "JPEG")
         crops.append({
             "path": crop_name,
             "person_index": i,
-            "bbox_original": det["bbox"],
+            "bbox_original": person["bbox"],
             "bbox_padded": [px1, py1, px2, py2],
-            "confidence": det["confidence"],
+            "confidence": person["confidence"],
         })
     return crops
 
@@ -247,17 +245,15 @@ def run_wall_cam_pipeline(
     proximity_threshold: float = 0.3,
 ) -> dict:
     """
-    Run YOLO detection on wall-cam video.
+    Run YOLO detection on wall-cam video using PyAV for decoding.
 
     Writes to job_dir:
       detections.jsonl     — one JSON record per sampled frame
-      hazard_events.json   — only frames where hazards were detected (+ crops metadata)
+      hazard_events.json   — only frames where hazards were detected + crop metadata
       summary.json         — aggregate counts and class list
 
     Flagged frames saved as JPEG in job_dir/frames/.
-    Person crops (padded) saved in job_dir/crops/ for VLM step.
-
-    Returns the summary dict.
+    Padded person crops saved in job_dir/crops/ for VLM step.
     """
     frames_dir = job_dir / "frames"
     crops_dir = job_dir / "crops"
@@ -265,12 +261,13 @@ def run_wall_cam_pipeline(
     crops_dir.mkdir(exist_ok=True)
 
     model = _get_model()
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"[pipeline] opening video: {video_path}")
+    container = av.open(str(video_path))
+    stream = container.streams.video[0]
+    fps = float(stream.average_rate) if stream.average_rate else 24.0
+    total_frames = stream.frames
+    print(f"[pipeline] video opened — fps={fps}, total_frames={total_frames}")
 
     hazard_events: List[dict] = []
     hazard_counts: Dict[str, int] = {}
@@ -279,17 +276,16 @@ def run_wall_cam_pipeline(
     frame_idx = 0
 
     with open(job_dir / "detections.jsonl", "w") as log:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-
+        for av_frame in container.decode(stream):
             if frame_idx % sample_every_n != 0:
                 frame_idx += 1
                 continue
 
+            # Decode to RGB PIL image
+            img: Image.Image = av_frame.to_image()
             timestamp = round(frame_idx / fps, 3)
-            results = model(frame, conf=conf_threshold, verbose=False)
+
+            results = model(img, conf=conf_threshold, verbose=False)
             result = results[0]
 
             detections: List[Dict] = []
@@ -318,25 +314,23 @@ def run_wall_cam_pipeline(
             }
 
             if hazards:
-                # Save full frame
                 frame_filename = f"frame_{frame_idx:06d}.jpg"
-                cv2.imwrite(str(frames_dir / frame_filename), frame)
-
-                # Save padded person crops for VLM
-                crops = _save_person_crops(frame, detections, frame_idx, crops_dir)
-
+                img.save(str(frames_dir / frame_filename), "JPEG")
+                crops = _save_person_crops(img, detections, frame_idx, crops_dir)
                 frame_record["frame_path"] = frame_filename
                 frame_record["person_crops"] = crops
                 hazard_events.append(frame_record)
-
                 for h in hazards:
                     hazard_counts[h["hazard_type"]] = hazard_counts.get(h["hazard_type"], 0) + 1
 
             log.write(json.dumps(frame_record) + "\n")
             frames_processed += 1
             frame_idx += 1
+            if frames_processed % 50 == 0:
+                print(f"[pipeline] processed {frames_processed} frames, {len(hazard_events)} hazard frames so far")
 
-    cap.release()
+    container.close()
+    print(f"[pipeline] done — {frames_processed} frames processed, {len(hazard_events)} hazard frames")
 
     summary = {
         "site_id": site_id,
@@ -349,7 +343,6 @@ def run_wall_cam_pipeline(
         "detected_classes": sorted(all_classes),
     }
 
-    (job_dir / "hazard_events.json").write_text(json.dumps(hazard_events, indent=2))
     (job_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
-    return summary
+    return summary, hazard_events

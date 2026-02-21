@@ -30,6 +30,7 @@ export default function RootLayout({
           <a href="/" className="text-sm text-zinc-400 hover:text-white transition-colors">Dashboard</a>
           <a href="/workers" className="text-sm text-zinc-400 hover:text-white transition-colors">Workers</a>
           <a href="/ingest" className="text-sm text-zinc-400 hover:text-white transition-colors">Ingest</a>
+          <a href="/jobs" className="text-sm text-zinc-400 hover:text-white transition-colors">Jobs</a>
         </nav>
         <main className="px-6 py-8">
           {children}

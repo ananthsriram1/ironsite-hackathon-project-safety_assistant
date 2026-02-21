@@ -53,21 +53,12 @@ class Site(Base):
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-class Device(Base):
-    __tablename__ = "devices"
-    id           = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    label        = Column(String, nullable=False)   # e.g. "Cam-03"
-    site_id      = Column(String, ForeignKey("sites.id"), nullable=False)
-    created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-
 class Worker(Base):
     __tablename__ = "workers"
     id                   = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     site_id              = Column(String, ForeignKey("sites.id"), nullable=False)
     display_name         = Column(String)
     appearance_embedding = Column(String)   # base64 — wall-cam re-ID
-    face_embedding       = Column(String)   # base64 — optional face recognition
     status               = Column(SAEnum(WorkerStatus), default=WorkerStatus.ACTIVE)
     created_at           = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     last_seen_at         = Column(DateTime)
@@ -85,7 +76,6 @@ class Shift(Base):
     started_at       = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     ended_at         = Column(DateTime)
     status           = Column(SAEnum(ShiftStatus), default=ShiftStatus.IN_PROGRESS)
-    pov_device_id    = Column(String, ForeignKey("devices.id"))
     msd_risk_score   = Column(Float)
     violation_count  = Column(Integer, default=0)
     compliant_count  = Column(Integer, default=0)
