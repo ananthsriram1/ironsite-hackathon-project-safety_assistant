@@ -1,8 +1,10 @@
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,7 @@ from database import (
     CameraSource, Device, EventCategory, SafetyEvent, SessionLocal, Severity,
     Shift, ShiftStatus, Site, Worker, WorkerStatus, init_db,
 )
+from pipeline.wall_cam import run_wall_cam_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -284,15 +287,52 @@ async def process_pov(
 
 @app.post("/process/wall-cam")
 async def process_wall_cam(
+    background_tasks: BackgroundTasks,
     video: UploadFile = File(...),
     site_id: str = Form(...),
     date: str = Form(...),
 ):
     job_id = str(uuid.uuid4())
+    job_dir = Path(f"/tmp/ironsite/{job_id}")
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save uploaded video to disk before handing off to background task
+    video_path = job_dir / "source.mp4"
+    with video_path.open("wb") as f:
+        shutil.copyfileobj(video.file, f)
+
     jobs[job_id] = {"status": "PROCESSING", "events_written": 0, "error": None}
-    # TODO: load workers for site, run detection + re-ID pipeline
+    background_tasks.add_task(_run_wall_cam_job, job_id, job_dir, video_path, site_id, date)
     print(f"[WALL-CAM] job={job_id} site={site_id} date={date}")
     return {"job_id": job_id, "status": "PROCESSING"}
+
+
+def _run_wall_cam_job(
+    job_id: str,
+    job_dir: Path,
+    video_path: Path,
+    site_id: str,
+    date: str,
+):
+    try:
+        summary = run_wall_cam_pipeline(
+            video_path=video_path,
+            job_dir=job_dir,
+            site_id=site_id,
+            date=date,
+        )
+        jobs[job_id] = {
+            "status": "COMPLETED",
+            "events_written": summary["frames_with_hazards"],
+            "error": None,
+            "summary": summary,
+            "job_dir": str(job_dir),
+        }
+    except Exception as e:
+        jobs[job_id] = {"status": "FAILED", "events_written": 0, "error": str(e)}
+    finally:
+        # Delete source video; keep frames/crops/json for VLM step
+        video_path.unlink(missing_ok=True)
 
 
 @app.get("/jobs/{job_id}")

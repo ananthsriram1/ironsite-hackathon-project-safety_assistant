@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 sqlalchemy
 python-multipart
+ultralytics
+huggingface_hub
+opencv-python-headless
+numpy

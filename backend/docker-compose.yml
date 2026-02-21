@@ -6,6 +6,7 @@ services:
     volumes:
       - .:/app              # live reload on code changes
       - db_data:/app/data   # SQLite file persists between restarts
+      - ./models:/app/models:ro  # model weights (read-only)
 
 volumes:
   db_data:
