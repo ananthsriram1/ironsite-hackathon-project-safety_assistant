@@ -1,0 +1,11 @@
+services:
+  ml:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app              # live reload on code changes
+      - db_data:/app/data   # SQLite file persists between restarts
+
+volumes:
+  db_data:

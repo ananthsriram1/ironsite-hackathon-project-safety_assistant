@@ -138,6 +138,37 @@ At the end of a shift, the dashboard generates a per-worker report:
 
 ---
 
+## Running the Application
+
+No cloud credentials needed. Everything runs locally.
+
+**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) + [Bun](https://bun.sh)
+
+```bash
+# one-time setup
+cp code/.env.example code/.env.local
+```
+
+**Terminal 1 — backend (API + ML + database):**
+```bash
+cd backend
+docker compose up
+```
+
+Starts FastAPI at `http://localhost:8000` with a SQLite database. Edits to backend files hot-reload automatically.
+
+Confirm it's up: `GET http://localhost:8000/health` → `{ "status": "ok" }`
+
+**Terminal 2 — frontend:**
+```bash
+cd code
+bun dev
+```
+
+Frontend at `http://localhost:3000`. The dashboard shows a green indicator when the backend is reachable.
+
+---
+
 ## Open Problems
 
 - Exact violation taxonomy — finalized after both pipelines are prototyped
