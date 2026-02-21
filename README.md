@@ -1,6 +1,6 @@
 # IronSite — Construction Site Safety Intelligence Dashboard
 
-A multi-camera ML pipeline for end-of-day safety reporting on construction sites. Ingests POV and wall-mounted camera footage, tags workers across sessions, tracks OSHA violations, and surfaces per-worker safety reports through a unified dashboard.
+An ML-powered end-of-day safety reporting dashboard for construction sites. Pulls from two independent camera data sources — POV body-worn footage and fixed wall-mounted cameras — to tag workers, track OSHA violations, and surface per-worker safety reports.
 
 ---
 
@@ -18,53 +18,84 @@ The core gap: no affordable, passive, continuous monitoring system exists that c
 
 ## Approach
 
-IronSite processes video at the end of a shift rather than in real-time, making it practical to deploy on commodity hardware. Two camera modalities feed into a shared ML backend:
+IronSite processes video at the end of a shift rather than in real-time, making it practical to deploy on commodity hardware. Two entirely separate data sources feed independently into the dashboard:
 
-### Camera Modalities
+---
 
-| Modality | Source | What it captures |
-|---|---|---|
-| **POV (body-worn)** | [CWPV Dataset](https://figshare.com/articles/dataset/CWPV_A_Working_Postures_of_the_Construction_Working_Postures_Videos_dataset/27907818) | First-person musculoskeletal posture — bending, reaching, lifting mechanics |
-| **Fixed wall/overhead** | [Wall-camera research (PMC)](https://pmc.ncbi.nlm.nih.gov/articles/PMC11367630/) | Bird's-eye spatial layout — zone violations, proximity to hazards, PPE presence |
+### Data Source 1 — POV (Body-Worn Cameras)
 
-POV footage enables fine-grained ergonomic and posture analysis (MSD risk, improper lifting). Wall-mounted footage enables spatial reasoning — who is where, how close to danger zones, whether protective gear is visible.
+**Research basis:** [CWPV Dataset](https://figshare.com/articles/dataset/CWPV_A_Working_Postures_of_the_Construction_Working_Postures_Videos_dataset/27907818)
+
+Workers wear cameras that capture first-person footage of their tasks throughout the shift. This footage is processed for musculoskeletal and ergonomic analysis:
+
+- Pose estimation on first-person video to extract joint angles and body mechanics
+- Detection of high-risk postures — improper lifting, sustained bending, overreach
+- MSD (musculoskeletal disorder) risk scoring per worker per shift
+- Flagging repetitive strain patterns over time
+
+```
+POV footage (per worker)
+        │
+        ▼
+  Pose Estimation
+  (joint angles, body mechanics)
+        │
+        ▼
+  Ergonomic Risk Scoring
+  (MSD risk, posture violations)
+        │
+        ▼
+  Per-worker posture event log
+```
+
+---
+
+### Data Source 2 — Fixed Wall-Mounted Cameras
+
+**Research basis:** [PMC11367630](https://pmc.ncbi.nlm.nih.gov/articles/PMC11367630/)
+
+Stationary IP cameras mounted around the site (~4m height, 1920×1080 at 24fps) provide a persistent spatial view of the work environment. This footage is processed for behavioral and spatial safety analysis:
+
+- Worker detection and re-identification across camera angles and occlusions
+- Zone mapping — who enters restricted or hazard areas
+- Proximity detection — workers too close to machinery, edges, or moving equipment
+- PPE detection — presence/absence of helmets, vests, eye protection
+- Behavioral classification — safe vs. unsafe actions (unauthorized interventions, improper walkway use, etc.)
+
+```
+Wall-cam footage (site-wide)
+        │
+        ▼
+  Person Detection + Re-ID
+  (persistent worker identity across frames)
+        │
+        ▼
+  Spatial Reasoning
+  (zone mapping, proximity, occupancy)
+        │
+        ▼
+  Behavioral Classification
+  (PPE, safe/unsafe actions)
+        │
+        ▼
+  Per-worker spatial + behavioral event log
+```
+
+---
 
 ### Worker Tagging & Object Permanence
 
-One of the hardest problems in multi-camera site monitoring is **re-identifying the same worker** across camera cuts, occlusions, and shift gaps. We address this with:
+Maintaining a consistent worker identity across an entire shift is a core technical problem — especially in the wall-cam system where workers move in and out of frame, get occluded, and reappear later. We address this with:
 
-- **Lightweight identity DB** — stores per-worker embeddings (appearance + skeletal signature) with a unique persistent ID per worker per site
-- **Object permanence module** — when a worker disappears from frame, the system holds their last known state and re-associates them on reappearance using embedding similarity rather than continuous tracking
-- **Cross-camera handoff** — POV camera wearer IDs are linked to wall-camera detections via spatial overlap and timing
+- **Lightweight identity DB** — stores per-worker appearance embeddings with a unique persistent ID per worker per site
+- **Object permanence module** — when a worker disappears from frame, the system holds their last known state and re-associates them on reappearance using embedding similarity rather than requiring continuous tracking
+- **Worker tagging** — each worker is assigned an ID at shift start; the DB persists across days so violation history accumulates over time
 
-### ML Pipeline
+---
 
-```
-Raw video (POV + wall cam)
-        │
-        ▼
- Person Detection + Tracking
- (re-ID embedding per worker)
-        │
-        ├──── POV branch: Pose estimation → Ergonomic scoring
-        │                  (joint angles, lift mechanics, MSD risk)
-        │
-        └──── Wall branch: Spatial reasoning
-                           (zone mapping, proximity, PPE detection)
-        │
-        ▼
- Per-worker event log (violations + compliant behaviors)
-        │
-        ▼
- End-of-day Dashboard Report
-```
+### Dashboard Aggregation
 
-### Spatial Reasoning
-
-The wall-camera branch builds a top-down occupancy map of the site using camera calibration. This enables:
-- Detection of workers entering restricted/hazard zones
-- Proximity warnings (worker too close to machinery, edges, moving equipment)
-- Crowd density and congestion in high-risk areas
+At end of shift, both pipelines write to a shared event store keyed by worker ID. The dashboard reads from this to generate reports — it does not need to know which camera source each event came from.
 
 ---
 
@@ -77,10 +108,10 @@ The system flags detectable violations drawn from OSHA's top cited standards. Co
 | 1926.501 | Fall protection — unguarded edges, open holes | Wall cam (zone + proximity) |
 | 1926.503 | Fall protection training compliance | Worker history DB |
 | 1926.451 | Scaffolding — improper use, missing guardrails | Wall cam (spatial) |
-| 1926.102 | Eye/face protection (PPE absent) | Wall cam + POV |
+| 1926.102 | Eye/face protection (PPE absent) | Wall cam |
 | 1910.212 | Machine guarding — worker too close to unguarded machinery | Wall cam (proximity) |
-| Ergonomic / MSD risk | Improper lifting, sustained awkward posture | POV (pose estimation) |
-| Ladder safety | Improper ladder use, overreach | Wall cam + POV |
+| Ergonomic / MSD risk | Improper lifting, sustained awkward posture | POV |
+| Ladder safety | Improper ladder use, overreach | Wall cam |
 | Respiratory protection | Missing respirator in flagged zones | Wall cam (PPE detection) |
 
 Violations are scored by severity and frequency. Workers with repeated violations are surfaced prominently in the report.
@@ -109,7 +140,8 @@ At the end of a shift, the dashboard generates a per-worker report:
 
 ## Open Problems
 
-- Exact violation taxonomy — what we can reliably detect will be finalized after the ML pipeline prototype
-- POV-to-wall cross-camera re-ID accuracy in crowded scenes
+- Exact violation taxonomy — finalized after both pipelines are prototyped
+- Re-ID accuracy in crowded scenes within the wall-cam system
 - False positive rate for PPE detection under variable lighting
 - Defining thresholds for "good safety behavior" vs. neutral behavior
+- How much signal POV footage gives when camera angle is obstructed mid-task
