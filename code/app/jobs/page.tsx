@@ -9,12 +9,18 @@ type Job = {
   status: "PROCESSING" | "COMPLETED" | "FAILED";
   events_written: number;
   error: string | null;
+  camera_source: string | null;
   shift?: {
     shift_id: string;
     date: string;
+    worker_id: string;
     worker: string | null;
+    site: string | null;
     violation_count: number;
+    event_count: number;
     status: string;
+    started_at: string;
+    ended_at: string | null;
   };
 };
 
@@ -59,20 +65,28 @@ export default function JobsPage() {
           <a key={job.job_id} href={`/jobs/${job.job_id}`} className="block rounded-xl border border-zinc-800 p-5 hover:border-zinc-600 transition-colors">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <p className="text-xs font-mono text-zinc-400 mb-1">{job.job_id}</p>
-                {job.shift && (
+                <div className="flex items-center gap-2 mb-1">
+                  <p className="text-xs font-mono text-zinc-500 truncate">{job.job_id}</p>
+                  {job.camera_source && (
+                    <span className="text-xs bg-zinc-800 text-zinc-400 border border-zinc-700 rounded px-1.5 py-0.5">{job.camera_source}</span>
+                  )}
+                </div>
+                {job.shift ? (
                   <p className="text-sm text-white">
-                    {job.shift.worker ?? "Unknown worker"} — {job.shift.date}
+                    {job.shift.worker ?? job.shift.worker_id} — {job.shift.site ?? "Unknown site"} — {job.shift.date}
                   </p>
+                ) : (
+                  <p className="text-sm text-zinc-500">No shift data</p>
                 )}
               </div>
               <StatusBadge status={job.status} />
             </div>
 
-            {job.status === "COMPLETED" && (
+            {job.status === "COMPLETED" && job.shift && (
               <div className="flex gap-6 mt-3 pt-3 border-t border-zinc-800">
-                <Stat label="Events written" value={job.events_written} />
-                {job.shift && <Stat label="Violations in DB" value={job.shift.violation_count} />}
+                <Stat label="Violations" value={job.shift.violation_count} />
+                <Stat label="Events in DB" value={job.shift.event_count} />
+                <Stat label="Frames flagged" value={job.events_written} />
               </div>
             )}
             {job.status === "FAILED" && (

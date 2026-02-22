@@ -1,3 +1,12 @@
+# Model weights
+*.pt
+*.pth
+*.ckpt
+
+# Job outputs (frames, crops, detections)
+backend/jobs/
+backend/data/
+
 # Datasets & data files
 data/
 datasets/
@@ -103,3 +112,4 @@ temp/
 *.pdf
 backend/.venv/
 backend/models/
+*.ipynb

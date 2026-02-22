@@ -1,9 +1,15 @@
 import json
+import os
 import shutil
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Persistent directory for job outputs (frames, crops, detections)
+# Defaults to ./jobs/ next to main.py so frames survive server restarts
+JOBS_DIR = Path(os.getenv("JOBS_DIR", Path(__file__).parent / "jobs"))
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -12,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from database import (
     CameraSource, EventCategory, SafetyEvent, SessionLocal, Severity,
-    Shift, ShiftStatus, Site, Worker, WorkerStatus, init_db,
+    Shift, ShiftStatus, Site, Worker, init_db,
 )
 from pipeline.wall_cam import run_wall_cam_pipeline
 
@@ -97,24 +103,6 @@ def register_worker(
     return {"worker_id": worker.id}
 
 
-@app.post("/workers/checkin", status_code=201)
-def checkin(
-    worker_id: str,
-    site_id: str,
-    date: str,
-    db: Session = Depends(get_db),
-):
-    """Open a shift for a worker."""
-    shift = Shift(
-        worker_id=worker_id,
-        site_id=site_id,
-        date=date,
-    )
-    db.add(shift)
-    db.commit()
-    db.refresh(shift)
-    return {"shift_id": shift.id}
-
 
 @app.get("/workers")
 def list_workers(site_id: str, db: Session = Depends(get_db)):
@@ -173,63 +161,10 @@ def get_shift(shift_id: str, db: Session = Depends(get_db)):
     }
 
 
-@app.patch("/shifts/{shift_id}/close")
-def close_shift(shift_id: str, msd_risk_score: float = None, db: Session = Depends(get_db)):
-    shift = db.query(Shift).filter(Shift.id == shift_id).first()
-    if not shift:
-        raise HTTPException(status_code=404, detail="Shift not found")
-    shift.status = ShiftStatus.COMPLETED
-    shift.ended_at = datetime.now(timezone.utc)
-    if msd_risk_score is not None:
-        shift.msd_risk_score = msd_risk_score
-    db.commit()
-    return {"shift_id": shift.id, "status": shift.status}
-
 
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
-
-@app.post("/events/ingest", status_code=201)
-def ingest_event(
-    shift_id: str,
-    worker_id: str,
-    camera_source: CameraSource,
-    event_category: EventCategory,
-    violation_type: str = "",
-    severity: Severity = None,
-    video_timestamp: float = 0.0,
-    clip_path: str = "",
-    db: Session = Depends(get_db),
-):
-    event = SafetyEvent(
-        shift_id=shift_id,
-        worker_id=worker_id,
-        camera_source=camera_source,
-        event_category=event_category,
-        violation_type=violation_type or None,
-        severity=severity,
-        video_timestamp=video_timestamp,
-        clip_path=clip_path or None,
-    )
-    db.add(event)
-
-    # Update denormalized counts on shift and worker
-    shift = db.query(Shift).filter(Shift.id == shift_id).first()
-    worker = db.query(Worker).filter(Worker.id == worker_id).first()
-    if shift and worker:
-        if event_category == EventCategory.VIOLATION:
-            shift.violation_count += 1
-            worker.total_violations += 1
-        else:
-            shift.compliant_count += 1
-            worker.total_compliant += 1
-        worker.last_seen_at = datetime.now(timezone.utc)
-
-    db.commit()
-    db.refresh(event)
-    return {"event_id": event.id}
-
 
 @app.get("/events")
 def list_events(
@@ -261,7 +196,7 @@ async def process_pov(
     date: str = Form(...),
 ):
     job_id = str(uuid.uuid4())
-    job_dir = Path(f"/tmp/ironsite/{job_id}")
+    job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     video_path = job_dir / "source.mp4"
     with video_path.open("wb") as f:
@@ -281,7 +216,7 @@ async def process_wall_cam(
     date: str = Form(...),
 ):
     job_id = str(uuid.uuid4())
-    job_dir = Path(f"/tmp/ironsite/{job_id}")
+    job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     video_path = job_dir / "source.mp4"
     with video_path.open("wb") as f:
@@ -317,20 +252,20 @@ def _run_detection_job(
             db.refresh(worker)
             print(f"[{camera_source}] {job_id} — auto-created worker {worker.id} ({worker_id})")
 
-        # Create shift
-        shift = Shift(worker_id=worker_id, site_id=site_id, date=date)
+        # Create shift — use resolved worker.id, not the raw form string
+        shift = Shift(worker_id=worker.id, site_id=site_id, date=date)
         db.add(shift)
         db.commit()
         db.refresh(shift)
         print(f"[{camera_source}] {job_id} — shift created: {shift.id}")
 
-        # Run YOLO pipeline
-        print(f"[{camera_source}] {job_id} — loading model")
-        from pipeline.wall_cam import _get_model
-        _get_model()
-        print(f"[{camera_source}] {job_id} — model loaded, running pipeline")
+        # Warm up models before pipeline (loads into GPU memory once)
+        print(f"[{camera_source}] {job_id} — loading models")
+        from pipeline.wall_cam import _get_yolo, _get_sam
+        _get_yolo(); _get_sam()
+        print(f"[{camera_source}] {job_id} — models loaded, running pipeline")
 
-        summary, hazard_events = run_wall_cam_pipeline(
+        summary, hazard_events, vlm_results = run_wall_cam_pipeline(
             video_path=video_path,
             job_dir=job_dir,
             site_id=site_id,
@@ -338,27 +273,75 @@ def _run_detection_job(
         )
         print(f"[{camera_source}] {job_id} — pipeline done: {summary}")
 
-        # Write each hazard to SQLite
+        # Write events to DB
+        # If VLM ran: use VLM-confirmed hazards (higher quality)
+        # If VLM is disabled (vlm_results=[]): fall back to raw YOLO hazard frames
         events_written = 0
-        for frame in hazard_events:
-            for hazard in frame["hazards"]:
-                sev_str = hazard.get("severity", "MEDIUM")
-                severity = Severity[sev_str] if sev_str in Severity.__members__ else Severity.MEDIUM
-                event = SafetyEvent(
-                    shift_id=shift.id,
-                    worker_id=worker_id,
-                    camera_source=camera_source,
-                    event_category=EventCategory.VIOLATION,
-                    violation_type=hazard.get("violation_type"),
-                    severity=severity,
-                    video_timestamp=frame["timestamp_seconds"],
-                    clip_path=frame.get("frame_path"),
-                    metadata_json=json.dumps(hazard),
-                )
-                db.add(event)
-                shift.violation_count += 1
-                worker.total_violations += 1
-                events_written += 1
+
+        if vlm_results:
+            for result in vlm_results:
+                if result["error"] or not result["vlm"]:
+                    continue
+                ev   = result["event"]
+                vlm  = result["vlm"]
+                for hazard in vlm["hazards"]:
+                    sev_str  = hazard.get("severity", "MEDIUM")
+                    severity = Severity[sev_str] if sev_str in Severity.__members__ else Severity.MEDIUM
+                    event = SafetyEvent(
+                        shift_id=shift.id,
+                        worker_id=worker.id,
+                        camera_source=camera_source,
+                        event_category=EventCategory.VIOLATION,
+                        violation_type=hazard.get("violation_type"),
+                        severity=severity,
+                        video_timestamp=ev["representative_timestamp"],
+                        clip_path=ev.get("representative_frame_path"),
+                        metadata_json=json.dumps({
+                            "explanation":       hazard.get("explanation"),
+                            "recommendation":    hazard.get("recommendation"),
+                            "scene_summary":     vlm.get("scene_summary"),
+                            "reasoning":         vlm.get("reasoning"),
+                            "confidence":        vlm.get("confidence"),
+                            "ppe_per_worker":    vlm.get("ppe_per_worker"),
+                            "event_start_ts":    ev["start_ts"],
+                            "event_end_ts":      ev["end_ts"],
+                            "event_duration_s":  ev["duration_seconds"],
+                            "event_frame_count": ev["frame_count"],
+                            "yolo_hazard_types": ev.get("yolo_hazard_types"),
+                        }),
+                    )
+                    db.add(event)
+                    shift.violation_count += 1
+                    worker.total_violations += 1
+                    events_written += 1
+        else:
+            # VLM disabled — write one SafetyEvent per YOLO hazard frame directly
+            for frame in hazard_events:
+                for hazard in frame.get("hazards", []):
+                    sev_str  = hazard.get("severity", "MEDIUM")
+                    severity = Severity[sev_str] if sev_str in Severity.__members__ else Severity.MEDIUM
+                    event = SafetyEvent(
+                        shift_id=shift.id,
+                        worker_id=worker.id,
+                        camera_source=camera_source,
+                        event_category=EventCategory.VIOLATION,
+                        violation_type=hazard.get("violation_type", "PPE_MISSING"),
+                        severity=severity,
+                        video_timestamp=frame["timestamp_seconds"],
+                        clip_path=frame.get("frame_path"),
+                        metadata_json=json.dumps({
+                            "hazard_type":     hazard.get("hazard_type"),
+                            "description":     hazard.get("description"),
+                            "track_id":        hazard.get("track_id"),
+                            "ppe_worn":        hazard.get("ppe_worn"),
+                            "ppe_missing":     hazard.get("ppe_missing"),
+                            "yolo_hazard_types": [hazard.get("hazard_type")],
+                        }),
+                    )
+                    db.add(event)
+                    shift.violation_count += 1
+                    worker.total_violations += 1
+                    events_written += 1
 
         shift.status = ShiftStatus.COMPLETED
         shift.ended_at = datetime.now(timezone.utc)
@@ -373,6 +356,7 @@ def _run_detection_job(
             "summary": summary,
             "job_dir": str(job_dir),
             "shift_id": shift.id,
+            "camera_source": camera_source.value,
         }
     except Exception as e:
         tb = traceback.format_exc()
@@ -390,18 +374,31 @@ def list_jobs(db: Session = Depends(get_db)):
     """List all jobs with their SQLite shift + event counts."""
     result = []
     for job_id, job in jobs.items():
-        entry = {"job_id": job_id, "status": job["status"], "events_written": job["events_written"], "error": job.get("error")}
+        entry = {
+            "job_id": job_id,
+            "status": job["status"],
+            "events_written": job["events_written"],
+            "error": job.get("error"),
+            "camera_source": job.get("camera_source"),
+        }
         shift_id = job.get("shift_id")
         if shift_id:
             shift = db.query(Shift).filter(Shift.id == shift_id).first()
             if shift:
                 worker = db.query(Worker).filter(Worker.id == shift.worker_id).first()
+                site   = db.query(Site).filter(Site.id == shift.site_id).first()
+                event_count = db.query(SafetyEvent).filter(SafetyEvent.shift_id == shift.id).count()
                 entry["shift"] = {
-                    "shift_id": shift.id,
-                    "date": shift.date,
-                    "worker": worker.display_name or worker.id if worker else None,
+                    "shift_id":       shift.id,
+                    "date":           shift.date,
+                    "worker_id":      shift.worker_id,
+                    "worker":         worker.display_name or worker.id if worker else shift.worker_id,
+                    "site":           site.name if site else shift.site_id,
                     "violation_count": shift.violation_count,
-                    "status": shift.status,
+                    "event_count":    event_count,
+                    "status":         shift.status,
+                    "started_at":     str(shift.started_at),
+                    "ended_at":       str(shift.ended_at) if shift.ended_at else None,
                 }
         result.append(entry)
     return result
@@ -414,62 +411,6 @@ def get_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, **job}
 
-
-@app.get("/jobs/{job_id}/db")
-def get_job_db(job_id: str, db: Session = Depends(get_db)):
-    """Debug endpoint — returns everything in SQLite for this job's shift."""
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if job["status"] != "COMPLETED":
-        raise HTTPException(status_code=409, detail=f"Job status is {job['status']}")
-
-    shift_id = job.get("shift_id")
-    if not shift_id:
-        raise HTTPException(status_code=404, detail="No shift linked to this job")
-
-    shift = db.query(Shift).filter(Shift.id == shift_id).first()
-    if not shift:
-        raise HTTPException(status_code=404, detail="Shift not found in DB")
-
-    worker = db.query(Worker).filter(Worker.id == shift.worker_id).first()
-    events = db.query(SafetyEvent).filter(SafetyEvent.shift_id == shift_id).all()
-
-    return {
-        "job_id": job_id,
-        "shift": {
-            "id": shift.id,
-            "worker_id": shift.worker_id,
-            "site_id": shift.site_id,
-            "date": shift.date,
-            "status": shift.status,
-            "started_at": shift.started_at,
-            "ended_at": shift.ended_at,
-            "violation_count": shift.violation_count,
-            "compliant_count": shift.compliant_count,
-        },
-        "worker": {
-            "id": worker.id,
-            "display_name": worker.display_name,
-            "total_violations": worker.total_violations,
-            "last_seen_at": worker.last_seen_at,
-        } if worker else None,
-        "events": [
-            {
-                "event_id": e.id,
-                "camera_source": e.camera_source,
-                "event_category": e.event_category,
-                "violation_type": e.violation_type,
-                "severity": e.severity,
-                "video_timestamp": e.video_timestamp,
-                "clip_path": e.clip_path,
-                "metadata": json.loads(e.metadata_json) if e.metadata_json else None,
-                "created_at": e.created_at,
-            }
-            for e in events
-        ],
-        "total_events": len(events),
-    }
 
 
 @app.get("/jobs/{job_id}/results")
@@ -484,20 +425,35 @@ def get_job_results(job_id: str):
     job_dir = Path(job["job_dir"])
 
     summary_file = job_dir / "summary.json"
-    hazards_file = job_dir / "hazard_events.json"
+    vlm_file     = job_dir / "vlm_assessments.json"
 
     if not summary_file.exists():
         raise HTTPException(status_code=404, detail="Results not found on disk")
 
-    import json
-    summary = json.loads(summary_file.read_text())
-    hazard_events = json.loads(hazards_file.read_text()) if hazards_file.exists() else []
+    summary      = json.loads(summary_file.read_text())
+    vlm_results  = json.loads(vlm_file.read_text()) if vlm_file.exists() else []
 
     return {
-        "job_id": job_id,
-        "summary": summary,
-        "hazard_events": hazard_events,
+        "job_id":      job_id,
+        "summary":     summary,
+        "vlm_results": vlm_results,
     }
+
+
+@app.get("/jobs/{job_id}/vlm")
+def get_job_vlm(job_id: str):
+    """Returns the full VLM assessment for each temporal event window in this job."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "COMPLETED":
+        raise HTTPException(status_code=409, detail=f"Job status is {job['status']}")
+
+    vlm_file = Path(job["job_dir"]) / "vlm_assessments.json"
+    if not vlm_file.exists():
+        raise HTTPException(status_code=404, detail="VLM assessments not found")
+
+    return json.loads(vlm_file.read_text())
 
 
 @app.get("/jobs/{job_id}/frames/{filename}")
@@ -507,7 +463,7 @@ def get_job_frame(job_id: str, filename: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    job_dir = Path(job.get("job_dir", f"/tmp/ironsite/{job_id}"))
+    job_dir = Path(job.get("job_dir", str(JOBS_DIR / job_id)))
 
     # Check frames/ then crops/ subdirectory
     for subdir in ("frames", "crops"):
@@ -533,5 +489,6 @@ def _fmt_event(e: SafetyEvent) -> dict:
         "severity": e.severity,
         "video_timestamp": e.video_timestamp,
         "clip_path": e.clip_path,
-        "created_at": e.created_at,
+        "metadata": json.loads(e.metadata_json) if e.metadata_json else None,
+        "created_at": str(e.created_at),
     }

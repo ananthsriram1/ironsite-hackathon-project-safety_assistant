@@ -1,12 +1,35 @@
 services:
+
+  ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   ml:
-    build: .
+    build:
+      context: .
+      args:
+        HF_TOKEN: ${HF_TOKEN}
     ports:
       - "8000:8000"
     volumes:
-      - .:/app              # live reload on code changes
-      - db_data:/app/data   # SQLite file persists between restarts
-      - ./models:/app/models:ro  # model weights (read-only)
+      - .:/app
+      - db_data:/app/data
+      - ./models:/app/models:ro
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=qwen2.5vl:7b
+    depends_on:
+      - ollama
 
 volumes:
   db_data:

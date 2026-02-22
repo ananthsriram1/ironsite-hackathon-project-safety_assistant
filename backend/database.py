@@ -5,9 +5,13 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timezone
 import enum
+import os
 import uuid
+from pathlib import Path
 
-DATABASE_URL = "sqlite:////app/data/ironsite.db"
+_DEFAULT_DB = Path(__file__).parent / "data" / "ironsite.db"
+_DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{_DEFAULT_DB}")
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
