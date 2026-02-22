@@ -18,7 +18,7 @@ The core gap: no affordable, passive, continuous monitoring system exists that c
 
 ## Approach
 
-IronSite processes video at the end of a shift rather than in real-time, making it practical to deploy on commodity hardware. Two entirely separate data sources feed independently into the dashboard:
+Our approach processes video at the end of a shift rather than in real-time, making it practical to deploy on commodity hardware. Users can choose to feed the system either **POV body-worn cameras** (posture and PPE on first-person footage) or **fixed wall-mounted cameras** (site-wide ergonomic and PPE analysis). Both posture and PPE analysis use the **same three-stage pipeline**: **Stage 1 — Primary detection** (fine-tuned YOLO) → **Stage 2 — Refinement & deduplication** (SAM 3) → **Stage 3 — Compliance verification & hallucination control** (fine-tuned Qwen3 VL 8B Instruct). YOLO produces initial bounding boxes and labels; SAM 3 refines masks, tags workers, and deduplicates; the VLM validates outputs with method prompting, chain-of-thought, and referential loops to enforce OSHA and reduce hallucination. See [Architecture (three-stage pipeline)](#architecture-three-stage-pipeline) below for the detailed flow.
 
 ---
 
@@ -26,7 +26,7 @@ IronSite processes video at the end of a shift rather than in real-time, making 
 
 **Research basis:** [CWPV Dataset](https://figshare.com/articles/dataset/CWPV_A_Working_Postures_of_the_Construction_Working_Postures_Videos_dataset/27907818)
 
-Workers wear cameras that capture first-person footage of their tasks throughout the shift. This footage is processed for musculoskeletal and ergonomic analysis:
+Workers wear cameras that capture first-person footage of their tasks throughout the shift. In our setup, POV footage is processed by the **posture** and **PPE** timestamp scripts (`analyze_pov_posture_timestamps.py`, `analyze_pov_ppe_timestamps.py`) and can feed the same three-stage pipeline (YOLO → SAM 3 → VLM) where integrated. This footage is used for musculoskeletal and ergonomic analysis:
 
 - Pose estimation on first-person video to extract joint angles and body mechanics
 - Detection of high-risk postures — improper lifting, sustained bending, overreach
@@ -54,7 +54,7 @@ POV footage (per worker)
 
 **Research basis:** [PMC11367630](https://pmc.ncbi.nlm.nih.gov/articles/PMC11367630/)
 
-Stationary IP cameras mounted around the site (~4m height, 1920×1080 at 24fps) provide a persistent spatial view of the work environment. This footage is processed for behavioral and spatial safety analysis:
+Stationary IP cameras mounted around the site (~4m height, 1920×1080 at 24fps) provide a persistent spatial view of the work environment. In the backend, **wall-cam** video runs the full YOLO + SAM3 + VLM pipeline (`wall_cam.py` → `vlm_step.assess_all_events`) for PPE and behavioral hazards. This footage is processed for:
 
 - Worker detection and re-identification across camera angles and occlusions
 - Zone mapping — who enters restricted or hazard areas
@@ -96,6 +96,47 @@ Maintaining a consistent worker identity across an entire shift is a core techni
 ### Dashboard Aggregation
 
 At end of shift, both pipelines write to a shared event store keyed by worker ID. The dashboard reads from this to generate reports — it does not need to know which camera source each event came from.
+
+---
+
+## Architecture (three-stage pipeline)
+
+Both **posture/ergonomics** and **PPE violation detection** share the same three-stage architecture. Artifacts flow from left to right; the VLM consumes refined outputs from Stages 1–2 plus video or key frames to produce compliance-checked final flags.
+
+```mermaid
+flowchart LR
+    subgraph input["Input"]
+        V[Video]
+    end
+    subgraph s1["Stage 1 — Primary detection"]
+        Y[Fine-tuned YOLO]
+    end
+    subgraph s2["Stage 2 — Refinement & deduplication"]
+        S[SAM 3]
+    end
+    subgraph s3["Stage 3 — Compliance verification"]
+        Q[Qwen3 VL 8B Instruct]
+    end
+    subgraph out["Outputs"]
+        P[Posture / ergonomic events]
+        PPE[PPE violation events]
+    end
+    V -->|frames| Y
+    Y -->|bboxes, labels, potential violations| S
+    S -->|refined bboxes, worker IDs, masks| Q
+    Q -->|method prompting, CoT, referential loops| P
+    Q --> PPE
+```
+
+| Stage | Component | Role | Output |
+|-------|-----------|------|--------|
+| **1** | Fine-tuned YOLO | First pass on video: workers, PPE items, poor-posture candidates, violation candidates | Initial bounding boxes, class labels, frame-level detections |
+| **2** | SAM 3 (Segment Anything Model 3) | Worker tagging, deduplication, refined masks and bboxes (MoE segmentation) | Refined bboxes, worker/track IDs, segmentation masks |
+| **3** | Fine-tuned Qwen3 VL 8B Instruct | Validates Stage 1–2 outputs; method prompting, chain-of-thought, referential loops; enforces OSHA; reduces hallucination | Compliance-checked violation flags → **final posture & ergonomic outputs** and **final PPE violation outputs** |
+
+**Backend implementation:** Stage 1–2 for wall-cam are in `backend/pipeline/wall_cam.py` (YOLO + BoT-SORT tracker → SAM3 masks → PPE association and hazard events → annotated frames and person crops for the VLM). The posture stream uses `backend/pipeline/posture.py` (YOLO pose model → joint angles → REBA-inspired risk and violation types → posture events; optional VLM pass). Stage 3 is in `backend/pipeline/vlm_step.py`: three-pass adversarial chain-of-thought (Jamie generator, Marcus discriminator, Marcus reconciler) with confidence calibration using YOLO/SAM data. The VLM consumes hazard frames, annotated images, and optional video chunks to produce structured assessments (`VLMAssessment` with hazards, PPE status, and recommendations).
+
+**Notebooks and CLI:** End-to-end posture (YOLO + SAM 3 + pose → angles → risk → per-worker log) is in `Posture_sam3_style.ipynb`; PPE (YOLO + SAM 3, CLASS_MAP, worker safety log) in `Sam3_test.ipynb`. For POV-only timestamp analysis without the full backend: `analyze_pov_posture_timestamps.py` (pose + ergonomic risk, compliant/noncompliant ranges, export clips/JSON/CSV) and `analyze_pov_ppe_timestamps.py` (PPE association, compliant/noncompliant ranges, export clips).
 
 ---
 
@@ -163,6 +204,18 @@ Overall, the pipeline has been run on many hours of POV footage across multiple 
 
 ---
 
+## Product / research findings
+
+**Implemented:** Backend three-stage pipeline: YOLO + SAM3 + VLM in `wall_cam.py` (PPE and proximity hazards), YOLO pose + ergonomic heuristics in `posture.py` (angles, REBA-style risk, violation types: `MSD_HIGH_RISK`, `AWKWARD_POSTURE`, `OVERREACH`, `KNEELING_SQUATTING_LOW`), and `vlm_step.py` (Qwen3-VL-8B three-pass adv-CoT, structured `VLMAssessment`). Ergonomic MVP in `ergonomic/mvp.py` (angles from keypoints, risk from angles, optional POST to `/events/ingest`). Posture and PPE notebooks (`Posture_sam3_style.ipynb`, `Sam3_test.ipynb`) and CLI timestamp scripts (`analyze_pov_posture_timestamps.py`, `analyze_pov_ppe_timestamps.py`) for POV compliant/noncompliant ranges and clip export. Dashboard and SQLite DB with workers, shifts, and safety events.
+
+**Validated / tuned:** Long POV footage runs; testing datasets (`Testing_Data_Posture`, `Testing_Data_PPE`) and sample frames for threshold tuning; VLM three-pass design for hallucination control and OSHA alignment; PPE temporal smoothing and confidence thresholds in the PPE script; posture confidence gates and REBA thresholds in the posture pipeline.
+
+**Models and weights:** Fine-tuned YOLO PPE detector (`backend/models/last.pt`), SAM3 (`/workspace/models/sam3.pt`), Qwen3-VL-8B-Instruct base (`/workspace/models/qwen3-vl`), optional LoRA adapter (`/workspace/models/adapter1`), YOLO pose (`/workspace/models/yolo26l-pose.pt` or `POSE_MODEL_PATH`).
+
+**Limitations and open problems:** Re-ID and object permanence for wall-cam are as designed but not fully deployed; PPE false positives under variable lighting; threshold sensitivity for “good” vs borderline posture; POV obstruction limits signal when the camera view is blocked. See [Open Problems](#open-problems) below.
+
+---
+
 ## Running the Application
 
 **Prerequisites:** Python 3.10+, [Bun](https://bun.sh), a GPU instance with CUDA (tested on 4× RTX PRO 6000 Blackwell)
@@ -198,7 +251,7 @@ bun dev
 
 Frontend at `http://localhost:3000`. The dashboard shows a green indicator when the backend is reachable.
 
-**For help running the repo,** contact: [asriram2@terpmail.umd.edu](mailto:asriram2@terpmail.umd.edu), [rajveer@terpmai.umd.edu](mailto:rajveer@umd.edu), [nmokaria@terpmail.umd.edu](mailto:nmokaria@terpmail.umd.edu).
+**For help running the repo,** contact: [asriram2@terpmail.umd.edu](mailto:asriram2@terpmail.umd.edu), [rajveer@umd.edu](mailto:rajveer@umd.edu), [nmokaria@terpmail.umd.edu](mailto:nmokaria@terpmail.umd.edu).
 
 ---
 
