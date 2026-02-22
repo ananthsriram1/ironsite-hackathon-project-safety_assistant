@@ -10,6 +10,8 @@ type JobStatus = {
   status: string;
   events_written: number;
   error: string | null;
+  progress?: number;
+  stage?: string;
   shift_id?: string;
   summary?: {
     frames_processed: number;
@@ -66,9 +68,10 @@ export default function JobDetailPage() {
   const [shift, setShift] = useState<Shift | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [polling, setPolling] = useState<NodeJS.Timer | null>(null);
 
   useEffect(() => {
-    async function load() {
+    async function loadOnce() {
       const res = await fetch(`${BASE}/jobs/${jobId}`);
       if (!res.ok) { setLoading(false); return; }
       const j: JobStatus = await res.json();
@@ -79,7 +82,17 @@ export default function JobDetailPage() {
       }
       setLoading(false);
     }
-    load();
+
+    // initial fetch
+    loadOnce();
+
+    // poll until done
+    const timer = setInterval(loadOnce, 2000);
+    setPolling(timer);
+    return () => {
+      clearInterval(timer);
+      setPolling(null);
+    };
   }, [jobId]);
 
   if (loading) {
@@ -98,6 +111,8 @@ export default function JobDetailPage() {
   }
 
   const summary = job.summary;
+  const progress = job.progress ?? (job.status === "COMPLETED" ? 1 : 0);
+  const stage = job.stage ?? (job.status === "COMPLETED" ? "completed" : job.status.toLowerCase());
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
@@ -118,6 +133,29 @@ export default function JobDetailPage() {
         <h1 className="page-title">Job Analysis</h1>
         <p className="page-sub mono">{jobId.slice(0, 20)}…</p>
       </div>
+
+      {/* Progress */}
+      {job.status !== "COMPLETED" && job.status !== "FAILED" && (
+        <div className="card" style={{ padding: "12px 14px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+            <span className="card-label">Processing</span>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)" }}>
+              {Math.round(progress * 100)}% · {stage}
+            </span>
+          </div>
+          <div style={{ position: "relative", width: "100%", height: "10px", background: "var(--surface-2)", borderRadius: "999px", overflow: "hidden", border: "1px solid var(--border)" }}>
+            <div style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: `${Math.max(3, Math.round(progress * 100))}%`,
+              background: "linear-gradient(90deg, var(--accent) 0%, var(--blue) 100%)",
+              transition: "width 0.4s ease",
+            }} />
+          </div>
+        </div>
+      )}
 
       {/* Error */}
       {job.status === "FAILED" && (
