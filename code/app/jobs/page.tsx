@@ -44,80 +44,127 @@ export default function JobsPage() {
   }, []);
 
   return (
-    <div className="max-w-5xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
+    <div>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "28px" }}>
         <div>
-          <h1 className="text-2xl font-semibold text-white">Jobs</h1>
-          <p className="text-sm text-zinc-500 mt-1">Processing history — refreshes every 3s</p>
+          <div className="page-eyebrow">Processing History</div>
+          <h1 className="page-title">Jobs</h1>
+          <p className="page-sub">Auto-refreshes every 3s</p>
         </div>
-        <button onClick={load} className="text-xs text-zinc-400 hover:text-white border border-zinc-700 rounded-lg px-3 py-1.5 transition-colors">
+        <button onClick={load} className="btn-ghost">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M10.5 6A4.5 4.5 0 112 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+            <path d="M10.5 3v3h-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
           Refresh
         </button>
       </div>
 
-      {loading && <p className="text-zinc-500 text-sm">Loading…</p>}
-      {!loading && jobs.length === 0 && (
-        <p className="text-zinc-600 text-sm">No jobs yet — upload a video from the Ingest page.</p>
+      {/* Loading */}
+      {loading && (
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-muted)", fontSize: "12px" }}>
+          <span className="spinner" /> Loading…
+        </div>
       )}
 
-      <div className="space-y-3">
-        {jobs.map((job) => (
-          <a key={job.job_id} href={`/jobs/${job.job_id}`} className="block rounded-xl border border-zinc-800 p-5 hover:border-zinc-600 transition-colors">
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <p className="text-xs font-mono text-zinc-500 truncate">{job.job_id}</p>
-                  {job.camera_source && (
-                    <span className="text-xs bg-zinc-800 text-zinc-400 border border-zinc-700 rounded px-1.5 py-0.5">{job.camera_source}</span>
-                  )}
+      {/* Empty */}
+      {!loading && jobs.length === 0 && (
+        <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
+          <div style={{ fontSize: "12px", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+            No jobs yet — upload a video from Ingest
+          </div>
+        </div>
+      )}
+
+      {/* Table */}
+      {jobs.length > 0 && (
+        <div className="card">
+          {/* Head */}
+          <div
+            className="data-table-head"
+            style={{ gridTemplateColumns: "1fr 130px 70px 80px 90px 110px" }}
+          >
+            {["Job / Shift", "Camera", "Frames", "Events", "Violations", "Status"].map((h) => (
+              <span key={h} className="th">{h}</span>
+            ))}
+          </div>
+
+          {/* Rows */}
+          {jobs.map((job) => (
+            <a
+              key={job.job_id}
+              href={`/jobs/${job.job_id}`}
+              className="data-row"
+              style={{ gridTemplateColumns: "1fr 130px 70px 80px 90px 110px" }}
+            >
+              {/* Job / shift */}
+              <div>
+                <div style={{ fontSize: "13px", color: "var(--text)", fontWeight: 500, marginBottom: "2px" }}>
+                  {job.shift
+                    ? <>{job.shift.worker ?? job.shift.worker_id} — {job.shift.site ?? "Unknown site"}</>
+                    : <span style={{ color: "var(--text-muted)" }}>No shift data</span>
+                  }
                 </div>
-                {job.shift ? (
-                  <p className="text-sm text-white">
-                    {job.shift.worker ?? job.shift.worker_id} — {job.shift.site ?? "Unknown site"} — {job.shift.date}
-                  </p>
-                ) : (
-                  <p className="text-sm text-zinc-500">No shift data</p>
+                <div style={{ fontSize: "10px", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                  {job.job_id.slice(0, 18)}… {job.shift ? `· ${job.shift.date}` : ""}
+                </div>
+              </div>
+
+              {/* Camera */}
+              <div>
+                {job.camera_source && (
+                  <span style={{
+                    fontSize: "9px",
+                    fontFamily: "var(--font-mono)",
+                    fontWeight: 700,
+                    letterSpacing: "0.08em",
+                    color: "var(--text-muted)",
+                    background: "var(--surface-2)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "4px",
+                    padding: "3px 7px",
+                  }}>
+                    {job.camera_source}
+                  </span>
                 )}
               </div>
-              <StatusBadge status={job.status} />
-            </div>
 
-            {job.status === "COMPLETED" && job.shift && (
-              <div className="flex gap-6 mt-3 pt-3 border-t border-zinc-800">
-                <Stat label="Violations" value={job.shift.violation_count} />
-                <Stat label="Events in DB" value={job.shift.event_count} />
-                <Stat label="Frames flagged" value={job.events_written} />
+              {/* Frames */}
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "13px", color: "var(--text-muted)" }}>
+                {job.events_written}
               </div>
-            )}
-            {job.status === "FAILED" && (
-              <p className="text-xs text-red-400 mt-2 truncate">{job.error}</p>
-            )}
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
 
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    COMPLETED: "bg-emerald-950 text-emerald-400 border-emerald-800",
-    FAILED: "bg-red-950 text-red-400 border-red-800",
-    PROCESSING: "bg-yellow-950 text-yellow-400 border-yellow-800",
-  };
-  return (
-    <span className={`shrink-0 text-xs font-medium px-2.5 py-1 rounded-lg border ${colors[status] ?? ""}`}>
-      {status === "PROCESSING" && <span className="animate-pulse">● </span>}
-      {status}
-    </span>
-  );
-}
+              {/* Events */}
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "13px", color: "var(--text)" }}>
+                {job.shift?.event_count ?? "—"}
+              </div>
 
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <div>
-      <p className="text-xs text-zinc-500">{label}</p>
-      <p className="text-lg font-semibold text-white">{value}</p>
+              {/* Violations */}
+              <div style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "13px",
+                fontWeight: 700,
+                color: (job.shift?.violation_count ?? 0) > 0 ? "var(--red)" : "var(--text-muted)",
+              }}>
+                {job.shift?.violation_count ?? "—"}
+              </div>
+
+              {/* Status */}
+              <div>
+                {job.status === "PROCESSING" ? (
+                  <span className="badge badge-processing">
+                    <span className="animate-pulse" style={{ display: "inline-block", width: "5px", height: "5px", borderRadius: "50%", background: "var(--amber)" }} />
+                    PROCESSING
+                  </span>
+                ) : (
+                  <span className={`badge badge-${job.status.toLowerCase()}`}>{job.status}</span>
+                )}
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

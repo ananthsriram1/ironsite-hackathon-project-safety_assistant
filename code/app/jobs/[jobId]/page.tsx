@@ -82,70 +82,133 @@ export default function JobDetailPage() {
     load();
   }, [jobId]);
 
-  if (loading) return <p className="text-zinc-500 text-sm p-8">Loading…</p>;
-  if (!job) return <p className="text-red-400 text-sm p-8">Job not found.</p>;
+  if (loading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-muted)", fontSize: "12px", padding: "40px 0" }}>
+        <span className="spinner" /> Loading report…
+      </div>
+    );
+  }
+  if (!job) {
+    return (
+      <div style={{ padding: "40px 0", fontSize: "12px", color: "var(--red)", fontFamily: "var(--font-mono)" }}>
+        JOB NOT FOUND
+      </div>
+    );
+  }
 
   const summary = job.summary;
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8 space-y-6">
+    <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
 
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <a href="/jobs" className="text-zinc-500 hover:text-white text-sm transition-colors">← Jobs</a>
-        <span className="text-zinc-700">/</span>
-        <p className="text-sm font-mono text-zinc-400 truncate">{jobId}</p>
-        <StatusBadge status={job.status} />
+      {/* Breadcrumb */}
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "14px" }}>
+          <a href="/jobs" style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-muted)", textDecoration: "none", letterSpacing: "0.08em" }}>
+            ← JOBS
+          </a>
+          <span style={{ color: "var(--border-2)", fontSize: "12px" }}>/</span>
+          <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "280px" }}>
+            {jobId}
+          </span>
+          <StatusBadge status={job.status} />
+        </div>
+        <div className="page-eyebrow">Incident Report</div>
+        <h1 className="page-title">Job Analysis</h1>
+        <p className="page-sub mono">{jobId.slice(0, 20)}…</p>
       </div>
 
+      {/* Error */}
       {job.status === "FAILED" && (
-        <div className="rounded-xl border border-red-900 bg-red-950/30 p-4">
-          <p className="text-sm text-red-400 font-mono">{job.error}</p>
+        <div style={{ padding: "14px 16px", background: "var(--red-bg)", border: "1px solid var(--red-border)", borderRadius: "8px" }}>
+          <div style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.12em", color: "var(--red)", marginBottom: "6px" }}>PIPELINE ERROR</div>
+          <pre style={{ fontSize: "12px", color: "#fca5a5", fontFamily: "var(--font-mono)", margin: 0, whiteSpace: "pre-wrap" }}>{job.error}</pre>
         </div>
       )}
 
       {/* Summary stats */}
       {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Stat label="Frames processed" value={summary.frames_processed} />
-          <Stat label="Hazard frames" value={summary.frames_with_hazards} />
-          <Stat label="Workers tracked" value={summary.workers_tracked} />
-          <Stat label="Events written" value={job.events_written} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px" }}>
+          <div className="stat-card" style={{ borderLeftColor: "var(--blue)" }}>
+            <div className="stat-label">Frames Processed</div>
+            <div className="stat-value" style={{ fontSize: "28px" }}>{summary.frames_processed}</div>
+          </div>
+          <div className="stat-card" style={{ borderLeftColor: "var(--amber)" }}>
+            <div className="stat-label">Hazard Frames</div>
+            <div className="stat-value" style={{ fontSize: "28px", color: "var(--amber)" }}>{summary.frames_with_hazards}</div>
+          </div>
+          <div className="stat-card" style={{ borderLeftColor: "var(--accent)" }}>
+            <div className="stat-label">Workers Tracked</div>
+            <div className="stat-value" style={{ fontSize: "28px" }}>{summary.workers_tracked}</div>
+          </div>
+          <div className="stat-card" style={{ borderLeftColor: "var(--emerald)" }}>
+            <div className="stat-label">Events Written</div>
+            <div className="stat-value" style={{ fontSize: "28px" }}>{job.events_written}</div>
+          </div>
         </div>
       )}
 
-      {/* Hazard counts */}
+      {/* Hazard breakdown */}
       {summary && Object.keys(summary.hazard_counts).length > 0 && (
-        <div className="rounded-xl border border-zinc-800 p-5">
-          <h2 className="text-sm font-medium text-zinc-400 mb-3">Hazard Breakdown</h2>
-          <div className="flex flex-wrap gap-2">
+        <div className="card">
+          <div className="card-head">
+            <span className="card-label">Hazard Breakdown</span>
+            <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+              {Object.values(summary.hazard_counts).reduce((a, b) => a + b, 0)} total detections
+            </span>
+          </div>
+          <div className="card-body" style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
             {Object.entries(summary.hazard_counts).map(([k, v]) => (
-              <span key={k} className="text-xs bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5">
-                <span className="text-zinc-400">{k.replace(/_/g, " ")}</span>
-                <span className="text-white font-semibold ml-2">{v}</span>
-              </span>
+              <div key={k} style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                padding: "8px 14px",
+                background: "var(--surface-2)",
+                border: "1px solid var(--border)",
+                borderRadius: "6px",
+              }}>
+                <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>{k.replace(/_/g, " ")}</span>
+                <span style={{ fontSize: "16px", fontWeight: 800, fontFamily: "var(--font-mono)", color: "var(--amber)", letterSpacing: "-0.02em" }}>{v}</span>
+              </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* Worker compliance */}
+      {/* Worker PPE compliance */}
       {summary && Object.keys(summary.worker_compliance ?? {}).length > 0 && (
-        <div className="rounded-xl border border-zinc-800 p-5">
-          <h2 className="text-sm font-medium text-zinc-400 mb-3">Worker PPE Compliance</h2>
-          <div className="space-y-2">
-            {Object.entries(summary.worker_compliance).map(([tid, c]) => (
-              <div key={tid} className="flex items-center gap-4 py-2 border-b border-zinc-800/50 last:border-0">
-                <span className="text-xs text-zinc-500 w-20">Worker #{tid}</span>
-                <span className={`text-xs font-medium w-20 ${c.compliant ? "text-emerald-400" : "text-red-400"}`}>
-                  {c.compliant ? "✓ Compliant" : "✗ Violation"}
+        <div className="card">
+          <div className="card-head">
+            <span className="card-label">PPE Compliance</span>
+          </div>
+          <div>
+            {Object.entries(summary.worker_compliance).map(([tid, c], i, arr) => (
+              <div key={tid} style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "16px",
+                padding: "10px 16px",
+                borderBottom: i < arr.length - 1 ? "1px solid var(--border)" : "none",
+              }}>
+                <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-muted)", width: "72px" }}>Worker #{tid}</span>
+                <span style={{
+                  fontSize: "9px",
+                  fontWeight: 700,
+                  fontFamily: "var(--font-mono)",
+                  letterSpacing: "0.1em",
+                  color: c.compliant ? "var(--emerald)" : "var(--red)",
+                  width: "72px",
+                }}>
+                  {c.compliant ? "✓ COMPLIANT" : "✗ VIOLATION"}
                 </span>
-                <div className="flex gap-1 flex-wrap">
+                <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", flex: 1 }}>
                   {c.ppe_confirmed.map(p => (
-                    <span key={p} className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800 rounded px-2 py-0.5">{p}</span>
+                    <span key={p} style={{ fontSize: "9px", background: "var(--emerald-bg)", color: "var(--emerald)", border: "1px solid var(--emerald-border)", borderRadius: "4px", padding: "2px 7px", fontFamily: "var(--font-mono)", fontWeight: 700 }}>{p}</span>
                   ))}
                   {c.ppe_missing.map(p => (
-                    <span key={p} className="text-xs bg-red-950 text-red-400 border border-red-800 rounded px-2 py-0.5">no {p}</span>
+                    <span key={p} style={{ fontSize: "9px", background: "var(--red-bg)", color: "var(--red)", border: "1px solid var(--red-border)", borderRadius: "4px", padding: "2px 7px", fontFamily: "var(--font-mono)", fontWeight: 700 }}>no {p}</span>
                   ))}
                 </div>
               </div>
@@ -154,120 +217,161 @@ export default function JobDetailPage() {
         </div>
       )}
 
-      {/* Events */}
+      {/* Safety Events */}
       {shift && (
-        <div className="rounded-xl border border-zinc-800 overflow-hidden">
-          <div className="px-5 py-4 border-b border-zinc-800">
-            <h2 className="text-sm font-medium text-zinc-400">
-              Safety Events <span className="text-white ml-1">{shift.events.length}</span>
-            </h2>
+        <div className="card">
+          <div className="card-head">
+            <span className="card-label">Safety Events</span>
+            <span style={{ fontSize: "14px", fontWeight: 800, fontFamily: "var(--font-mono)", color: shift.events.length > 0 ? "var(--red)" : "var(--text)" }}>
+              {shift.events.length}
+            </span>
           </div>
 
           {shift.events.length === 0 ? (
-            <p className="text-zinc-600 text-sm p-5">No events recorded.</p>
-          ) : (
-            <div className="divide-y divide-zinc-800">
-              {shift.events.map((e) => (
-                <div key={e.event_id}>
-                  {/* Row */}
-                  <div
-                    onClick={() => setExpanded(expanded === e.event_id ? null : e.event_id)}
-                    className="flex items-center gap-4 px-5 py-3 hover:bg-zinc-900 cursor-pointer transition-colors"
-                  >
-                    <span className="font-mono text-zinc-300 text-xs w-16">{e.video_timestamp.toFixed(2)}s</span>
-                    <SeverityBadge severity={e.severity} />
-                    <span className="text-sm text-white flex-1">{e.violation_type?.replace(/_/g, " ") ?? "—"}</span>
-                    {e.metadata?.track_id != null && (
-                      <span className="text-xs text-zinc-500">Worker #{e.metadata.track_id}</span>
-                    )}
-                    {e.metadata?.event_start_ts != null && (
-                      <span className="text-xs text-zinc-600 font-mono">
-                        {e.metadata.event_start_ts.toFixed(1)}s – {e.metadata.event_end_ts?.toFixed(1)}s
-                      </span>
-                    )}
-                    <span className="text-zinc-600 text-xs">{expanded === e.event_id ? "▲" : "▼"}</span>
-                  </div>
-
-                  {/* Expanded */}
-                  {expanded === e.event_id && (
-                    <div className="bg-zinc-950 px-5 py-4 space-y-4">
-
-                      {/* Frame image */}
-                      {e.clip_path && (
-                        <div>
-                          <p className="text-xs text-zinc-500 mb-2">Flagged Frame</p>
-                          <img
-                            src={`${BASE}/jobs/${jobId}/frames/${e.clip_path}`}
-                            alt="flagged frame"
-                            className="rounded-lg max-h-80 border border-zinc-800"
-                          />
-                        </div>
-                      )}
-
-                      {/* Explanation + recommendation */}
-                      {e.metadata?.explanation && (
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="rounded-lg bg-zinc-900 p-3">
-                            <p className="text-xs text-zinc-500 mb-1">Explanation</p>
-                            <p className="text-sm text-white">{e.metadata.explanation}</p>
-                          </div>
-                          {e.metadata.recommendation && (
-                            <div className="rounded-lg bg-zinc-900 p-3">
-                              <p className="text-xs text-zinc-500 mb-1">Recommendation</p>
-                              <p className="text-sm text-white">{e.metadata.recommendation}</p>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* PPE worn / missing on this worker */}
-                      {(e.metadata?.ppe_worn || e.metadata?.ppe_missing) && (
-                        <div className="flex gap-2 flex-wrap">
-                          {e.metadata.ppe_worn?.map(p => (
-                            <span key={p} className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800 rounded px-2 py-0.5">{p}</span>
-                          ))}
-                          {e.metadata.ppe_missing?.map(p => (
-                            <span key={p} className="text-xs bg-red-950 text-red-400 border border-red-800 rounded px-2 py-0.5">missing: {p}</span>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* YOLO hazard types that triggered this event */}
-                      {e.metadata?.yolo_hazard_types && e.metadata.yolo_hazard_types.length > 0 && (
-                        <div>
-                          <p className="text-xs text-zinc-500 mb-1">YOLO triggers</p>
-                          <div className="flex gap-2 flex-wrap">
-                            {e.metadata.yolo_hazard_types.map(h => (
-                              <span key={h} className="text-xs bg-zinc-900 border border-zinc-700 rounded px-2 py-0.5 text-zinc-300">{h}</span>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Raw metadata dump */}
-                      <details className="group">
-                        <summary className="text-xs text-zinc-600 cursor-pointer hover:text-zinc-400">Raw metadata</summary>
-                        <pre className="mt-2 text-xs text-zinc-500 overflow-auto bg-zinc-900 rounded-lg p-3">
-                          {JSON.stringify(e.metadata, null, 2)}
-                        </pre>
-                      </details>
-
-                    </div>
-                  )}
-                </div>
-              ))}
+            <div className="card-body" style={{ fontSize: "12px", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+              No events recorded.
             </div>
+          ) : (
+            <>
+              {/* Table header */}
+              <div
+                className="data-table-head"
+                style={{ gridTemplateColumns: "64px 84px 1fr 80px 130px 18px" }}
+              >
+                {["Time", "Severity", "Violation", "Worker", "Range", ""].map(h => (
+                  <span key={h} className="th">{h}</span>
+                ))}
+              </div>
+
+              <div>
+                {shift.events.map((e) => (
+                  <div key={e.event_id} style={{ borderBottom: "1px solid var(--border)" }}>
+                    {/* Row */}
+                    <div
+                      className="event-row"
+                      style={{ gridTemplateColumns: "64px 84px 1fr 80px 130px 18px" }}
+                      onClick={() => setExpanded(expanded === e.event_id ? null : e.event_id)}
+                    >
+                      <span style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+                        {e.video_timestamp.toFixed(2)}s
+                      </span>
+                      <div><SeverityBadge severity={e.severity} /></div>
+                      <span style={{ fontSize: "13px", color: "var(--text)", fontWeight: 500 }}>
+                        {e.violation_type?.replace(/_/g, " ") ?? "—"}
+                      </span>
+                      <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+                        {e.metadata?.track_id != null ? `#${e.metadata.track_id}` : "—"}
+                      </span>
+                      <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>
+                        {e.metadata?.event_start_ts != null
+                          ? `${e.metadata.event_start_ts.toFixed(1)}s – ${e.metadata.event_end_ts?.toFixed(1)}s`
+                          : "—"}
+                      </span>
+                      <span style={{ fontSize: "10px", color: "var(--text-dim)", textAlign: "right" }}>
+                        {expanded === e.event_id ? "▲" : "▼"}
+                      </span>
+                    </div>
+
+                    {/* Expanded detail */}
+                    {expanded === e.event_id && (
+                      <div className="event-detail animate-in">
+
+                        {/* Frame image */}
+                        {e.clip_path && (
+                          <div>
+                            <div style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.12em", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: "10px" }}>
+                              Flagged Frame
+                            </div>
+                            <img
+                              src={`${BASE}/jobs/${jobId}/frames/${e.clip_path}`}
+                              alt="flagged frame"
+                              style={{ borderRadius: "6px", maxHeight: "320px", border: "1px solid var(--border)", display: "block" }}
+                            />
+                          </div>
+                        )}
+
+                        {/* Explanation + recommendation */}
+                        {e.metadata?.explanation && (
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                            <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "6px", padding: "14px" }}>
+                              <div style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.12em", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: "8px" }}>Explanation</div>
+                              <p style={{ fontSize: "13px", color: "var(--text)", margin: 0, lineHeight: 1.6 }}>{e.metadata.explanation}</p>
+                            </div>
+                            {e.metadata.recommendation && (
+                              <div style={{ background: "var(--surface)", border: "1px solid var(--accent-dark)", borderRadius: "6px", padding: "14px" }}>
+                                <div style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.12em", color: "var(--accent)", textTransform: "uppercase", marginBottom: "8px" }}>Recommendation</div>
+                                <p style={{ fontSize: "13px", color: "var(--text)", margin: 0, lineHeight: 1.6 }}>{e.metadata.recommendation}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* PPE worn / missing */}
+                        {(e.metadata?.ppe_worn?.length || e.metadata?.ppe_missing?.length) ? (
+                          <div>
+                            <div style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.12em", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: "8px" }}>PPE Status</div>
+                            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                              {e.metadata?.ppe_worn?.map(p => (
+                                <span key={p} style={{ fontSize: "9px", background: "var(--emerald-bg)", color: "var(--emerald)", border: "1px solid var(--emerald-border)", borderRadius: "4px", padding: "3px 8px", fontFamily: "var(--font-mono)", fontWeight: 700 }}>{p}</span>
+                              ))}
+                              {e.metadata?.ppe_missing?.map(p => (
+                                <span key={p} style={{ fontSize: "9px", background: "var(--red-bg)", color: "var(--red)", border: "1px solid var(--red-border)", borderRadius: "4px", padding: "3px 8px", fontFamily: "var(--font-mono)", fontWeight: 700 }}>missing: {p}</span>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {/* YOLO triggers */}
+                        {e.metadata?.yolo_hazard_types && e.metadata.yolo_hazard_types.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.12em", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: "8px" }}>YOLO Triggers</div>
+                            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                              {e.metadata.yolo_hazard_types.map(h => (
+                                <span key={h} style={{ fontSize: "10px", background: "var(--surface-3)", border: "1px solid var(--border)", borderRadius: "4px", padding: "3px 8px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{h}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Raw metadata */}
+                        <details>
+                          <summary style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.1em", color: "var(--text-dim)", cursor: "pointer", userSelect: "none" }}>
+                            RAW METADATA ▼
+                          </summary>
+                          <pre style={{ marginTop: "10px", fontSize: "11px", color: "var(--text-muted)", fontFamily: "var(--font-mono)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "6px", padding: "14px", overflow: "auto", lineHeight: 1.6 }}>
+                            {JSON.stringify(e.metadata, null, 2)}
+                          </pre>
+                        </details>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
       )}
 
       {/* Detected classes */}
       {summary && summary.detected_classes.length > 0 && (
-        <div className="rounded-xl border border-zinc-800 p-5">
-          <h2 className="text-sm font-medium text-zinc-400 mb-3">Detected Classes</h2>
-          <div className="flex flex-wrap gap-2">
+        <div className="card">
+          <div className="card-head">
+            <span className="card-label">Detected Classes</span>
+            <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{summary.detected_classes.length}</span>
+          </div>
+          <div className="card-body" style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
             {summary.detected_classes.map(c => (
-              <span key={c} className="text-xs bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-400">{c}</span>
+              <span key={c} style={{
+                fontSize: "10px",
+                fontFamily: "var(--font-mono)",
+                background: "var(--surface-2)",
+                border: "1px solid var(--border)",
+                borderRadius: "4px",
+                padding: "3px 9px",
+                color: "var(--text-muted)",
+              }}>
+                {c}
+              </span>
             ))}
           </div>
         </div>
@@ -278,38 +382,31 @@ export default function JobDetailPage() {
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    COMPLETED: "bg-emerald-950 text-emerald-400 border-emerald-800",
-    FAILED: "bg-red-950 text-red-400 border-red-800",
-    PROCESSING: "bg-yellow-950 text-yellow-400 border-yellow-800",
+  const cls: Record<string, string> = {
+    COMPLETED: "badge badge-completed",
+    FAILED: "badge badge-failed",
+    PROCESSING: "badge badge-processing",
   };
   return (
-    <span className={`text-xs font-medium px-2.5 py-1 rounded-lg border ${colors[status] ?? "border-zinc-700 text-zinc-400"}`}>
-      {status === "PROCESSING" && <span className="animate-pulse">● </span>}
+    <span className={cls[status] ?? "badge"}>
+      {status === "PROCESSING" && (
+        <span className="animate-pulse" style={{ display: "inline-block", width: "5px", height: "5px", borderRadius: "50%", background: "var(--amber)" }} />
+      )}
       {status}
     </span>
   );
 }
 
 function SeverityBadge({ severity }: { severity: string | null }) {
-  const colors: Record<string, string> = {
-    CRITICAL: "bg-red-950 text-red-400 border-red-800",
-    HIGH: "bg-orange-950 text-orange-400 border-orange-800",
-    MEDIUM: "bg-yellow-950 text-yellow-400 border-yellow-800",
-    LOW: "bg-zinc-900 text-zinc-400 border-zinc-700",
+  const cls: Record<string, string> = {
+    CRITICAL: "badge badge-critical",
+    HIGH:     "badge badge-high",
+    MEDIUM:   "badge badge-medium",
+    LOW:      "badge badge-low",
   };
   return (
-    <span className={`text-xs font-medium px-2 py-0.5 rounded border ${colors[severity ?? ""] ?? "border-zinc-700 text-zinc-500"}`}>
+    <span className={cls[severity ?? ""] ?? "badge badge-low"}>
       {severity ?? "—"}
     </span>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
-      <p className="text-xs text-zinc-500 mb-1">{label}</p>
-      <p className="text-2xl font-semibold text-white">{value}</p>
-    </div>
   );
 }

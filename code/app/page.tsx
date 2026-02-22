@@ -37,83 +37,148 @@ export default function DashboardPage() {
   const completed = jobs.filter((j) => j.status === "COMPLETED");
   const totalViolations = completed.reduce((s, j) => s + (j.shift?.violation_count ?? 0), 0);
   const totalEvents    = completed.reduce((s, j) => s + (j.shift?.event_count ?? 0), 0);
-
-  // Top violation types across all jobs (from summary hazard_counts would need more data — use event counts for now)
   const recentJobs = completed.slice(0, 5);
 
+  const processing = jobs.filter(j => j.status === "PROCESSING").length;
+  const failed = jobs.filter(j => j.status === "FAILED").length;
+
   return (
-    <div className="max-w-5xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
+    <div>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "28px" }}>
         <div>
-          <h1 className="text-2xl font-semibold text-white">Site Dashboard</h1>
-          <p className="text-sm text-zinc-500 mt-1">Safety overview across all processed jobs</p>
+          <div className="page-eyebrow">Operations Center</div>
+          <h1 className="page-title">Dashboard</h1>
+          <p className="page-sub">Safety overview · all processed jobs</p>
         </div>
         <BackendStatus connected={connected} />
       </div>
 
-      <div className="grid grid-cols-3 gap-4 mb-8">
-        <StatCard label="Jobs Processed" value={String(completed.length)} />
-        <StatCard label="Violations Detected" value={String(totalViolations)} />
-        <StatCard label="Events in DB" value={String(totalEvents)} />
+      {/* KPI Row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px", marginBottom: "24px" }}>
+        <div className="stat-card" style={{ borderLeftColor: "var(--accent)" }}>
+          <div className="stat-label">Jobs Processed</div>
+          <div className="stat-value">{completed.length}</div>
+        </div>
+        <div className="stat-card" style={{ borderLeftColor: "var(--red)" }}>
+          <div className="stat-label">Violations Detected</div>
+          <div className="stat-value" style={{ color: totalViolations > 0 ? "var(--red)" : "var(--text)" }}>
+            {totalViolations}
+          </div>
+        </div>
+        <div className="stat-card" style={{ borderLeftColor: "var(--blue)" }}>
+          <div className="stat-label">Events in DB</div>
+          <div className="stat-value">{totalEvents}</div>
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-6">
-        <section className="rounded-xl border border-zinc-800 p-5">
-          <h2 className="text-sm font-medium text-zinc-400 mb-4">Recent Jobs</h2>
+      {/* Bottom panels */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+        {/* Recent Jobs */}
+        <div className="card">
+          <div className="card-head">
+            <span className="card-label">Recent Jobs</span>
+            <a
+              href="/jobs"
+              style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--accent)", textDecoration: "none", letterSpacing: "0.06em" }}
+            >
+              ALL JOBS →
+            </a>
+          </div>
           {recentJobs.length === 0 ? (
-            <p className="text-zinc-600 text-sm">No completed jobs yet.</p>
+            <div className="card-body" style={{ fontSize: "12px", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+              No completed jobs yet.
+            </div>
           ) : (
-            <div className="space-y-2">
+            <div>
               {recentJobs.map((j) => (
                 <a
                   key={j.job_id}
                   href={`/jobs/${j.job_id}`}
-                  className="flex items-center justify-between py-2 border-b border-zinc-800/50 last:border-0 hover:opacity-75 transition-opacity"
+                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid var(--border)", textDecoration: "none", transition: "background 0.1s" }}
+                  onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-2)")}
+                  onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
                 >
                   <div>
-                    <p className="text-sm text-white">{j.shift?.worker ?? "Unknown"} — {j.shift?.site ?? j.job_id.slice(0, 8)}</p>
-                    <p className="text-xs text-zinc-500">{j.shift?.date} · {j.camera_source}</p>
+                    <div style={{ fontSize: "13px", color: "var(--text)", marginBottom: "2px", fontWeight: 500 }}>
+                      {j.shift?.worker ?? "Unknown"} — {j.shift?.site ?? j.job_id.slice(0, 8)}
+                    </div>
+                    <div style={{ fontSize: "10px", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                      {j.shift?.date} · {j.camera_source ?? "—"}
+                    </div>
                   </div>
-                  <span className="text-xs text-red-400 font-medium">{j.shift?.violation_count ?? 0} violations</span>
+                  <div style={{ fontSize: "11px", fontFamily: "var(--font-mono)", fontWeight: 700, color: (j.shift?.violation_count ?? 0) > 0 ? "var(--red)" : "var(--text-muted)" }}>
+                    {j.shift?.violation_count ?? 0} viol.
+                  </div>
                 </a>
               ))}
             </div>
           )}
-        </section>
+        </div>
 
-        <section className="rounded-xl border border-zinc-800 p-5">
-          <h2 className="text-sm font-medium text-zinc-400 mb-4">Processing Status</h2>
-          <div className="space-y-2">
+        {/* Processing Status */}
+        <div className="card">
+          <div className="card-head">
+            <span className="card-label">Processing Status</span>
+            <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{jobs.length} total</span>
+          </div>
+          <div>
             {[
-              { label: "Completed", count: jobs.filter(j => j.status === "COMPLETED").length, color: "text-emerald-400" },
-              { label: "Processing", count: jobs.filter(j => j.status === "PROCESSING").length, color: "text-yellow-400" },
-              { label: "Failed", count: jobs.filter(j => j.status === "FAILED").length, color: "text-red-400" },
-            ].map(({ label, count, color }) => (
-              <div key={label} className="flex items-center justify-between py-2 border-b border-zinc-800/50 last:border-0">
-                <span className="text-sm text-zinc-400">{label}</span>
-                <span className={`text-sm font-semibold ${color}`}>{count}</span>
+              { label: "Completed", count: completed.length, color: "var(--emerald)", bg: "var(--emerald-bg)", border: "var(--emerald-border)" },
+              { label: "Processing", count: processing,      color: "var(--amber)",   bg: "var(--amber-bg)",   border: "var(--amber-border)" },
+              { label: "Failed",     count: failed,          color: "var(--red)",     bg: "var(--red-bg)",     border: "var(--red-border)"   },
+            ].map(({ label, count, color, bg, border }) => (
+              <div
+                key={label}
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: "1px solid var(--border)" }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <div style={{ width: "8px", height: "8px", borderRadius: "2px", background: color, flexShrink: 0 }} />
+                  <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: 500 }}>{label}</span>
+                </div>
+                <span style={{
+                  fontSize: "20px",
+                  fontWeight: 800,
+                  fontFamily: "var(--font-mono)",
+                  color,
+                  background: bg,
+                  border: `1px solid ${border}`,
+                  padding: "0 12px",
+                  borderRadius: "5px",
+                  lineHeight: "32px",
+                }}>
+                  {count}
+                </span>
               </div>
             ))}
           </div>
-        </section>
+        </div>
       </div>
     </div>
   );
 }
 
 function BackendStatus({ connected }: { connected: boolean | null }) {
-  if (connected === null)
-    return <span className="flex items-center gap-2 text-xs text-zinc-500"><span className="h-2 w-2 rounded-full bg-zinc-600 animate-pulse" />Connecting...</span>;
-  if (connected)
-    return <span className="flex items-center gap-2 text-xs text-emerald-400"><span className="h-2 w-2 rounded-full bg-emerald-400" />Backend connected</span>;
-  return <span className="flex items-center gap-2 text-xs text-red-400"><span className="h-2 w-2 rounded-full bg-red-400" />Backend offline</span>;
-}
-
-function StatCard({ label, value }: { label: string; value: string }) {
+  if (connected === null) {
+    return (
+      <div className="status-pill" style={{ color: "var(--text-muted)" }}>
+        <span className="status-dot animate-pulse" style={{ background: "var(--text-dim)" }} />
+        Connecting
+      </div>
+    );
+  }
+  if (connected) {
+    return (
+      <div className="status-pill" style={{ color: "var(--emerald)" }}>
+        <span className="status-dot" style={{ background: "var(--emerald)", boxShadow: "0 0 6px var(--emerald)" }} />
+        Backend Online
+      </div>
+    );
+  }
   return (
-    <div className="rounded-xl border border-zinc-800 p-5">
-      <p className="text-xs text-zinc-500 mb-1">{label}</p>
-      <p className="text-3xl font-semibold text-white">{value}</p>
+    <div className="status-pill" style={{ color: "var(--red)" }}>
+      <span className="status-dot" style={{ background: "var(--red)" }} />
+      Backend Offline
     </div>
   );
 }
