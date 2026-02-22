@@ -3,8 +3,8 @@ vlm_step.py — VLM hazard assessment using Qwen3-VL-8B-Instruct via HuggingFace
 
 Three-pass adversarial Chain-of-Thought (adv-CoT) flow:
   Pass 1 — Jamie Reyes (Generator)   : raw video only, no machine data, field inspection notes
-  Pass 2 — Marcus Chen (Discriminator): annotated frames only, no Jamie's notes, no raw video
-                                        → independent machine-anchored expert assessment
+  Pass 2 — Marcus Chen (Discriminator): raw video + annotated frames, no Jamie's notes
+                                        → independent expert assessment (catches what Jamie missed)
   Pass 3 — Marcus Chen (Reconciler)  : Jamie's notes + Marcus's notes + YOLO data + annotated frames
                                         → explicit conflict resolution → final structured JSON
 
@@ -457,28 +457,29 @@ ANNOTATED FRAMES ({n} images follow — YOLO+SAM bounding boxes and segmentation
 
 PASS2_MARCUS_SYSTEM = """\
 You are Marcus Chen. You have 24 years as a senior construction safety manager and Chief \
-Safety Officer. You are reviewing the output of an AI detection system (YOLO + SAM) that \
-has analysed a site camera video and flagged potential violations.
+Safety Officer. You are conducting your own independent review of a site camera video.
 
-You have NOT seen the raw video. You have NOT seen any other inspector's report. \
-You are looking only at the machine-annotated frames — bounding boxes and segmentation \
-masks drawn by the AI over the flagged moments.
+You have NOT seen any other inspector's report. You are watching the raw video yourself, \
+and you also have the machine-annotated frames from the AI detection system (YOLO + SAM) \
+showing bounding boxes and segmentation masks over flagged moments.
 
-Your job: apply your professional judgment to the machine's output. Write your assessment notes.
-  • For each flagged detection: do you agree it is a genuine violation based on the annotated frame?
-  • Is the visual evidence in the frame strong enough to be confident?
-  • Does the scene context visible in the frame support or undermine the detection?
-  • Note anything the machine appears to have missed that you can see in the annotated frames.
+Watch the raw video with your own eyes first. Then cross-reference with the annotated frames.
+Your job: write your independent professional assessment.
+  • What do you observe in the raw video? Any workers, PPE, hazards, unsafe behaviour?
+  • For each machine-flagged detection: do you agree based on what you see?
+  • Did the machine miss anything you can see clearly in the raw footage?
   • Note detections that look like noise or false positives.
 
-Write in plain English. Be direct. This is your expert opinion on the machine's work. \
-Do NOT produce JSON — a third pass will produce the final structured output."""
+Write in plain English. Be direct. Do NOT produce JSON — a third pass will do that."""
 
 PASS2_MARCUS_USER_TEMPLATE = """\
 VIDEO OVERVIEW:
   Duration   : ~{duration:.1f}s  |  Camera: {camera_type}
 
 {camera_guidance}
+
+The raw video is above. Watch it with your own eyes first.
+Then review the YOLO + SAM detection data and annotated frames below.
 
 YOLO + SAM DETECTION SUMMARY:
 {yolo_sam_data}
@@ -488,8 +489,8 @@ CONFIDENCE CALIBRATION:
 
 {annotated_frame_note}
 
-Write your professional assessment of what the machine detected. \
-Do NOT produce JSON — just your expert notes."""
+Write your independent professional assessment — what you observed in the raw video, \
+cross-referenced with what the machine flagged. Do NOT produce JSON — just your expert notes."""
 
 # ---------------------------------------------------------------------------
 # Pass 3 — Reconciler: Jamie's notes + Marcus's notes + YOLO data → final JSON
@@ -695,6 +696,7 @@ def _run_pass1(
 # ---------------------------------------------------------------------------
 
 def _run_pass2_marcus(
+    video_path: Path,
     annotated_paths: list[Path],
     hazard_frames: list[dict],
     summary: dict,
@@ -726,13 +728,19 @@ def _run_pass2_marcus(
         {
             "role": "user",
             "content": [
+                {
+                    "type":       "video",
+                    "video":      video_path.as_uri(),
+                    "fps":        VIDEO_FPS,
+                    "max_pixels": MAX_PIXELS,
+                },
                 *annotated_blocks,
                 {"type": "text", "text": user_text},
             ],
         },
     ]
 
-    print(f"[vlm:pass2] Marcus reviewing annotated frames independently ({len(annotated_paths)} frames, no raw video, no Jamie's notes)")
+    print(f"[vlm:pass2] Marcus reviewing raw video + annotated frames independently ({len(annotated_paths)} frames, no Jamie's notes)")
     notes = _run_inference(model, processor, messages, MAX_NEW_TOKENS_P2, "pass2")
     print(f"[vlm:pass2] Marcus notes captured ({len(notes)} chars)")
     return notes
@@ -833,9 +841,9 @@ def run_vlm_on_video(
     # ── Pass 1: Jamie — fresh eyes on raw video ───────────────────────────────
     pass1_notes = _run_pass1(video_path, duration, cam_key, model, processor)
 
-    # ── Pass 2: Marcus — independent review of annotated frames only ──────────
+    # ── Pass 2: Marcus — independent review of raw video + annotated frames ──
     pass2_notes = _run_pass2_marcus(
-        annotated_paths, hazard_frames, summary or {},
+        video_path, annotated_paths, hazard_frames, summary or {},
         duration, cam_key, model, processor,
     )
 
