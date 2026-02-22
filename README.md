@@ -1,6 +1,6 @@
 # Construction Site Safety Intelligence Dashboard - UMD IRONSITE HACKATHON '26
 
-An ML-powered end-of-day safety reporting dashboard for construction sites. Pulls from two independent camera data sources — POV body-worn footage and fixed wall-mounted cameras — to tag workers, track OSHA violations, and surface per-worker safety reports.
+An ML-powered end-of-day safety reporting dashboard for construction sites. Pulls from two independent camera data sources — POV body-worn footage and fixed wall-mounted cameras — to tag PPE violations, track OSHA violations, and surface per-worker safety reports.
 
 ---
 
