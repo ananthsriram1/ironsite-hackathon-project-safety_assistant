@@ -1,0 +1,16 @@
+# Qwen3-VL fine-tuning on ConstructionSite 10k (B200 / CUDA 12.x)
+# Install after PyTorch: pip install -r requirements-finetune.txt
+
+torch>=2.1.0
+torchvision
+torchaudio
+transformers>=4.45.0
+datasets
+accelerate
+peft
+trl
+evaluate
+bitsandbytes
+pillow
+qwen-vl-utils
+tensorboard
