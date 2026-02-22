@@ -111,6 +111,10 @@ class HazardDetail(BaseModel):
         "LADDER_MISUSE",
         "SCAFFOLD_VIOLATION",
         "BEHAVIORAL_UNSAFE",
+        "AWKWARD_POSTURE",
+        "MSD_HIGH_RISK",
+        "OVERREACH",
+        "KNEELING_SQUATTING_LOW",
     ]
     severity:         Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
     explanation:      str
@@ -321,9 +325,18 @@ CAMERA TYPE: FIXED WALL / OVERHEAD CAMERA
 confirmation. Do not flag glove absence if the worker's hands are too small or too far \
 to see clearly.
   • Hard hats and hi-vis vests are the most reliably visible PPE from this angle — \
-treat confirmed absence as a high-confidence violation.
+    treat confirmed absence as a high-confidence violation.
   • Watch for workers entering excavation zones, machinery proximity, or areas marked \
-with cones/barriers.""",
+    with cones/barriers.""",
+
+    "POSTURE": """\
+CAMERA TYPE: POSTURE ANALYSIS (pose model feed)
+  • Focus on body mechanics: trunk flexion, arm elevation/overreach, squatting/kneeling.
+  • Hazards emitted by upstream posture model include: OVERREACH, AWKWARD_POSTURE,
+    MSD_HIGH_RISK, KNEELING_SQUATTING_LOW. Treat these as ergonomic violations.
+  • You are NOT checking PPE here unless it is clearly relevant to the posture hazard.
+  • Use the annotated frames and timestamps to confirm the risky posture; ignore frames
+    where keypoints are low-confidence or occluded.""",
 }
 
 # ---------------------------------------------------------------------------
@@ -888,7 +901,13 @@ def run_vlm_on_video(
     total_frames = (summary or {}).get("total_frames", 0)
     video_fps    = (summary or {}).get("video_fps", 25.0)
     duration     = hazard_frames[-1]["timestamp_seconds"] if hazard_frames else round(total_frames / max(video_fps, 1), 1)
-    cam_key      = "POV" if "POV" in camera_source.upper() else "WALL_CAM"
+    source_upper = camera_source.upper()
+    if "POV" in source_upper:
+        cam_key = "POV"
+    elif "POSTURE" in source_upper:
+        cam_key = "POSTURE"
+    else:
+        cam_key = "WALL_CAM"
     print(f"[vlm] video: {video_path} ({duration:.1f}s, {len(hazard_frames)} hazard frames, camera={cam_key})")
 
     # Collect annotated frames saved by the YOLO+SAM pipeline pass

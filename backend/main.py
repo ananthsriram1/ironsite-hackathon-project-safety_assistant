@@ -5,6 +5,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import concurrent.futures
 
 # Persistent directory for job outputs (frames, crops, detections)
 # Defaults to ./jobs/ next to main.py so frames survive server restarts
@@ -21,6 +22,7 @@ from database import (
     Shift, ShiftStatus, Site, Worker, init_db,
 )
 from pipeline.wall_cam import run_wall_cam_pipeline
+from pipeline.posture import run_posture_pipeline, run_posture_vlm
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +62,10 @@ app.add_middleware(
 # In-memory job store
 jobs: dict[str, dict] = {}
 
+def _set_progress(job_id: str, progress: float, stage: str):
+    if job_id in jobs:
+        jobs[job_id]["progress"] = max(0.0, min(1.0, progress))
+        jobs[job_id]["stage"] = stage
 
 def get_db():
     db = SessionLocal()
@@ -217,6 +223,7 @@ async def process_pov(
     with video_path.open("wb") as f:
         shutil.copyfileobj(video.file, f)
     jobs[job_id] = {"status": "PROCESSING", "events_written": 0, "error": None}
+    _set_progress(job_id, 0.02, "queued")
     background_tasks.add_task(_run_detection_job, job_id, job_dir, video_path, site_id, date, worker_id, CameraSource.POV)
     print(f"[POV] job={job_id} worker={worker_id} site={site_id} date={date}")
     return {"job_id": job_id, "status": "PROCESSING"}
@@ -237,6 +244,7 @@ async def process_wall_cam(
     with video_path.open("wb") as f:
         shutil.copyfileobj(video.file, f)
     jobs[job_id] = {"status": "PROCESSING", "events_written": 0, "error": None}
+    _set_progress(job_id, 0.02, "queued")
     background_tasks.add_task(_run_detection_job, job_id, job_dir, video_path, site_id, date, worker_id, CameraSource.WALL_CAM)
     print(f"[WALL-CAM] job={job_id} worker={worker_id} site={site_id} date={date}")
     return {"job_id": job_id, "status": "PROCESSING"}
@@ -275,13 +283,16 @@ def _run_detection_job(
         print(f"[{camera_source}] {job_id} — shift created: {shift.id}")
 
         # Step 1 — model warm-up
-        print(f"[{camera_source}] {job_id} — [1/4] loading YOLO + SAM")
+        print(f"[{camera_source}] {job_id} — [1/5] loading YOLO + SAM")
+        _set_progress(job_id, 0.10, "warming models")
         from pipeline.wall_cam import _get_yolo, _get_sam
         _get_yolo(); _get_sam()
-        print(f"[{camera_source}] {job_id} — [1/4] models ready")
+        print(f"[{camera_source}] {job_id} — [1/5] models ready")
+        _set_progress(job_id, 0.18, "models ready")
 
         # Step 2 — YOLO + SAM pipeline
-        print(f"[{camera_source}] {job_id} — [2/4] running YOLO+SAM pipeline")
+        print(f"[{camera_source}] {job_id} — [2/5] running YOLO+SAM pipeline")
+        _set_progress(job_id, 0.25, "running yolo+sam")
         summary, hazard_events, vlm_results = run_wall_cam_pipeline(
             video_path=video_path,
             job_dir=job_dir,
@@ -290,25 +301,57 @@ def _run_detection_job(
             camera_source=camera_source.value,
         )
         print(
-            f"[{camera_source}] {job_id} — [2/4] pipeline done: "
+            f"[{camera_source}] {job_id} — [2/5] pipeline done: "
             f"{summary['frames_processed']} frames, "
             f"{summary['frames_with_hazards']} hazard frames, "
             f"{summary['workers_tracked']} workers"
         )
+        _set_progress(job_id, 0.45, "pipeline done")
 
-        # Step 3 — VLM (may have errored; fallback to YOLO results)
-        valid_vlm = [r for r in vlm_results if r.get("vlm") and not r.get("error")]
-        errored_vlm = [r for r in vlm_results if r.get("error")]
-        print(
-            f"[{camera_source}] {job_id} — [3/4] VLM: "
-            f"{len(valid_vlm)} valid, {len(errored_vlm)} errored of {len(vlm_results)} events"
+        # Step 3 — Posture pipeline (ergonomic) kicked async to overlap with VLM prep
+        posture_summary = {}
+        posture_events = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _posture_pool:
+            posture_future = _posture_pool.submit(
+                run_posture_pipeline,
+                video_path=video_path,
+                job_dir=job_dir,
+            )
+
+            # Step 4 — VLM (may have errored; fallback to YOLO results)
+            valid_vlm = [r for r in vlm_results if r.get("vlm") and not r.get("error")]
+            errored_vlm = [r for r in vlm_results if r.get("error")]
+            print(
+                f"[{camera_source}] {job_id} — [4/6] VLM: "
+                f"{len(valid_vlm)} valid, {len(errored_vlm)} errored of {len(vlm_results)} events"
+            )
+            if errored_vlm:
+                print(f"[{camera_source}] {job_id} — VLM errors: {[r["error"] for r in errored_vlm[:3]]}")
+            _set_progress(job_id, 0.55, "vlm")
+
+            # Wait for posture to finish
+            try:
+                posture_summary, posture_events = posture_future.result()
+                print(f"[{camera_source}] {job_id} — posture: {posture_summary.get("events", 0)} risk frames")
+                _set_progress(job_id, 0.65, "posture done")
+            except Exception as pe_err:
+                print(f"[{camera_source}] {job_id} — posture pipeline failed: {pe_err}")
+                posture_summary, posture_events = {}, []
+
+        # Step 5 — Posture VLM (reuse VLM structure for posture hazards)
+        print(f"[{camera_source}] {job_id} — [5/6] running posture VLM")
+        posture_vlm_results = run_posture_vlm(
+            video_path=video_path,
+            job_dir=job_dir,
+            posture_events=posture_events,
+            posture_summary=posture_summary,
+            camera_source="POSTURE",
         )
-        if errored_vlm:
-            print(f"[{camera_source}] {job_id} — VLM errors: {[r['error'] for r in errored_vlm[:3]]}")
+        print(f"[{camera_source}] {job_id} — posture VLM chunks: {len(posture_vlm_results)}")
+        _set_progress(job_id, 0.8, "posture vlm")
 
-        # Step 4 — DB write
-        print(f"[{camera_source}] {job_id} — [4/4] writing events to DB")
-
+        # Step 6 — DB write
+        print(f"[{camera_source}] {job_id} — [6/6] writing events to DB")
         # Write events to DB
         # If VLM ran: use VLM-confirmed hazards (higher quality)
         # If VLM is disabled (vlm_results=[]): fall back to raw YOLO hazard frames
@@ -383,31 +426,111 @@ def _run_detection_job(
                             "yolo_hazard_types": [hazard.get("hazard_type")],
                         }),
                     )
-                    db.add(event)
-                    shift.violation_count += 1
-                    worker.total_violations += 1
-                    events_written += 1
+            db.add(event)
+            shift.violation_count += 1
+            worker.total_violations += 1
+            events_written += 1
+
+        # Posture events → DB (non-compliant only)
+        for pe in posture_events:
+            if pe.get("violation_type") == "COMPLIANT_BEHAVIOR":
+                continue
+            severity = Severity.HIGH if pe.get("risk_level", 1) >= 3 else Severity.MEDIUM
+            dedup_key = (pe.get("track_id"), pe.get("violation_type"), "POSTURE_RAW")
+            if dedup_key in seen_violations:
+                continue
+            seen_violations.add(dedup_key)
+            event = SafetyEvent(
+                shift_id=shift.id,
+                worker_id=worker.id,
+                camera_source=camera_source,
+                event_category=EventCategory.VIOLATION,
+                violation_type=pe.get("violation_type"),
+                severity=severity,
+                video_timestamp=pe.get("timestamp_seconds"),
+                clip_path=pe.get("frame_path"),
+                metadata_json=json.dumps({
+                    "risk_level":    pe.get("risk_level"),
+                    "confidence":    pe.get("confidence"),
+                    "angles":        pe.get("angles"),
+                    "reason_short":  pe.get("reason_short"),
+                    "track_id":      pe.get("track_id"),
+                    "bbox":          pe.get("bbox"),
+                }),
+            )
+            db.add(event)
+            shift.violation_count += 1
+            worker.total_violations += 1
+            events_written += 1
+
+        # Posture VLM events → DB (use VLM-confirmed posture hazards)
+        for chunk in posture_vlm_results:
+            if chunk.get("error") or not chunk.get("vlm"):
+                continue
+            ev = chunk["event"]
+            vlm = chunk["vlm"]
+            for hazard in vlm.get("hazards", []):
+                vtype = hazard.get("violation_type")
+                dedup_key = (vtype, "POSTURE_VLM")
+                if dedup_key in seen_violations:
+                    continue
+                seen_violations.add(dedup_key)
+                sev_str  = hazard.get("severity", "MEDIUM")
+                severity = Severity[sev_str] if sev_str in Severity.__members__ else Severity.MEDIUM
+                event = SafetyEvent(
+                    shift_id=shift.id,
+                    worker_id=worker.id,
+                    camera_source=camera_source,
+                    event_category=EventCategory.VIOLATION,
+                    violation_type=vtype,
+                    severity=severity,
+                    video_timestamp=ev.get("representative_timestamp", ev.get("start_ts")),
+                    clip_path=hazard.get("best_frame_path") or ev.get("representative_frame_path"),
+                    metadata_json=json.dumps({
+                        "source":          "POSTURE_VLM",
+                        "scene_summary":   vlm.get("scene_summary"),
+                        "reasoning":       vlm.get("reasoning"),
+                        "confidence":      vlm.get("confidence"),
+                        "risk_level":      hazard.get("severity"),
+                        "best_frame_path": hazard.get("best_frame_path"),
+                        "chunk_index":     ev.get("chunk_index"),
+                    }),
+                )
+                db.add(event)
+                shift.violation_count += 1
+                worker.total_violations += 1
+                events_written += 1
 
         shift.status = ShiftStatus.COMPLETED
         shift.ended_at = datetime.now(timezone.utc)
         worker.last_seen_at = datetime.now(timezone.utc)
         db.commit()
         print(f"[{camera_source}] {job_id} — {events_written} events written to SQLite")
+        _set_progress(job_id, 0.98, "db written")
 
         jobs[job_id] = {
             "status": "COMPLETED",
             "events_written": events_written,
             "error": None,
             "summary": summary,
+            "posture_summary": posture_summary,
             "job_dir": str(job_dir),
             "shift_id": shift.id,
             "camera_source": camera_source.value,
+            "progress": 1.0,
+            "stage": "completed",
         }
     except Exception as e:
         tb = traceback.format_exc()
         print(f"[{camera_source}] {job_id} — FAILED: {e}\n{tb}")
         db.rollback()
-        jobs[job_id] = {"status": "FAILED", "events_written": 0, "error": str(e)}
+        jobs[job_id] = {
+            "status": "FAILED",
+            "events_written": 0,
+            "error": str(e),
+            "progress": 1.0,
+            "stage": "failed",
+        }
     finally:
         db.close()
         video_path.unlink(missing_ok=True)
@@ -425,6 +548,8 @@ def list_jobs(db: Session = Depends(get_db)):
             "events_written": job["events_written"],
             "error": job.get("error"),
             "camera_source": job.get("camera_source"),
+            "progress": job.get("progress"),
+            "stage": job.get("stage"),
         }
         shift_id = job.get("shift_id")
         if shift_id:
@@ -471,17 +596,26 @@ def get_job_results(job_id: str):
 
     summary_file = job_dir / "summary.json"
     vlm_file     = job_dir / "vlm_assessments.json"
+    posture_file = job_dir / "posture_events.json"
+    posture_summary_file = job_dir / "posture_summary.json"
+    posture_vlm_file = job_dir / "posture_vlm.json"
 
     if not summary_file.exists():
         raise HTTPException(status_code=404, detail="Results not found on disk")
 
     summary      = json.loads(summary_file.read_text())
     vlm_results  = json.loads(vlm_file.read_text()) if vlm_file.exists() else []
+    posture_events  = json.loads(posture_file.read_text()) if posture_file.exists() else []
+    posture_summary = json.loads(posture_summary_file.read_text()) if posture_summary_file.exists() else {}
+    posture_vlm     = json.loads(posture_vlm_file.read_text()) if posture_vlm_file.exists() else []
 
     return {
         "job_id":      job_id,
         "summary":     summary,
         "vlm_results": vlm_results,
+        "posture_summary": posture_summary,
+        "posture_events": posture_events,
+        "posture_vlm": posture_vlm,
     }
 
 
@@ -510,8 +644,8 @@ def get_job_frame(job_id: str, filename: str):
 
     job_dir = Path(job.get("job_dir", str(JOBS_DIR / job_id)))
 
-    # Check frames/ then crops/ subdirectory
-    for subdir in ("frames", "crops"):
+    # Check frames/ then crops/ then posture_frames subdirectory
+    for subdir in ("frames", "crops", "posture_frames"):
         img_path = job_dir / subdir / filename
         if img_path.exists():
             return FileResponse(str(img_path), media_type="image/jpeg")
