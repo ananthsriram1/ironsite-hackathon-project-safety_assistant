@@ -130,11 +130,36 @@ At the end of a shift, the dashboard generates a per-worker report:
 
 ---
 
-## Data Sources
+## Data & Datasets
 
+We used a substantial amount of video and derived data to develop and validate the posture and PPE pipelines.
+
+**Research & reference datasets**
 - **CWPV Dataset** — Working Postures of Construction Workers Videos. POV footage of construction workers performing real tasks, annotated for musculoskeletal posture analysis. [Figshare](https://figshare.com/articles/dataset/CWPV_A_Working_Postures_of_the_Construction_Working_Postures_Videos_dataset/27907818)
-- **Wall-camera safety research** — IP camera surveillance methodology for classifying safe/unsafe worker behaviors from fixed overhead cameras. [PMC11367630](https://pmc.ncbi.nlm.nih.gov/articles/PMC11367630/)
+- **Video dataset for safe/unsafe behaviours (Önal & Dandıl)** — High-resolution video dataset (691 clips, 8 behaviour classes) from fixed IP cameras in a production facility; used as reference for wall-cam behavioural classification. [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC11367630/) · [Mendeley Data](https://data.mendeley.com/datasets/xjmtb22pff/1)
 - **OSHA Top Violations 2024** — [osha.gov](https://www.osha.gov/top10citedstandards/)
+
+**PPE & construction safety image/video datasets (training & reference)**
+- **Ultralytics Construction-PPE** — 11 classes (helmet, vest, gloves, boots, goggles, person + no_helmet, no_goggles, no_gloves, no_boots). Used for PPE detector training and pipeline design. [Docs](https://docs.ultralytics.com/datasets/detect/construction-ppe/#dataset-structure)
+- **Construction site safety (Roboflow)** — [Kaggle](https://www.kaggle.com/datasets/snehilsanyal/construction-site-safety-image-dataset-roboflow/data)
+- **PPE kit detection — construction site workers** — [Kaggle](https://www.kaggle.com/datasets/ketakichalke/ppe-kit-detection-construction-site-workers)
+- **PPE dataset (YOLOv8)** — [Kaggle](https://www.kaggle.com/datasets/shlokraval/ppe-dataset-yolov8)
+- **PPE detection v1** — [Kaggle](https://www.kaggle.com/datasets/beyzakucuk/ppe-detection-v1)
+- **SH17 dataset for PPE detection** — [Kaggle](https://www.kaggle.com/datasets/mugheesahmad/sh17-dataset-for-ppe-detection/data)
+
+**POV video used in this project**
+- **Ironsite Hackathon / production dataset** — Long-form POV videos (e.g. 15–20+ minutes per clip) from construction and production scenarios (masonry, prep, standby, transit). Used for posture analysis, PPE analysis, and pipeline testing.
+- **Annotated runs** — Posture- and PPE-tracked outputs (per-worker labels, compliant/non-compliant segments) generated from the above for validation and tuning.
+
+**Derived datasets for validation**
+- **Testing_Data_Posture** — Per-video folders of compliant and non-compliant clips (1–2+ minutes each) exported from the posture pipeline for human review and threshold tuning.
+- **Testing_Data_PPE** — Same structure for PPE (compliant vs missing hard hat/vest/gloves).
+- **Sample frames** — Frame-level exports (e.g. every 8 frames) from selected videos for frame-by-frame review and agreement/disagreement analysis.
+
+**Other video**
+- Short clips (youtube) used for demos and additional posture/PPE testing.
+
+Overall, the pipeline has been run on many hours of POV footage across multiple videos; the testing datasets and sample frames support iterative refinement of posture and PPE logic.
 
 ---
 
@@ -172,6 +197,8 @@ bun dev
 ```
 
 Frontend at `http://localhost:3000`. The dashboard shows a green indicator when the backend is reachable.
+
+**For help running the repo,** contact: [asriram2@terpmail.umd.edu](mailto:asriram2@terpmail.umd.edu), [rajveer@terpmai.umd.edu](mailto:rajveer@umd.edu), [nmokaria@terpmail.umd.edu](mailto:nmokaria@terpmail.umd.edu).
 
 ---
 
