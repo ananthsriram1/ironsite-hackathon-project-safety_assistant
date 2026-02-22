@@ -42,9 +42,9 @@ torch.backends.cudnn.benchmark = True
 # Model paths
 # ---------------------------------------------------------------------------
 
-MODELS_DIR   = Path(__file__).parent.parent / "models"
+MODELS_DIR      = Path(__file__).parent.parent / "models"
 YOLO_MODEL_PATH = MODELS_DIR / "last.pt"
-SAM_MODEL_PATH  = MODELS_DIR / "sam3.pt"
+SAM_MODEL_PATH  = Path("/workspace/models/sam3.pt")
 
 # ---------------------------------------------------------------------------
 # Class normalisation
@@ -102,6 +102,7 @@ def _get_sam() -> SAM:
     if _sam is None:
         print(f"[pipeline] loading SAM3 from {SAM_MODEL_PATH}")
         _sam = SAM(str(SAM_MODEL_PATH))
+        _sam.overrides["imgsz"] = 1036   # pre-set to valid stride-14 multiple, silences per-frame warning
     return _sam
 
 
@@ -212,8 +213,12 @@ def _process_frame(
 
     # --- SAM3 masking (only if there are detections) ---
     if boxes_xyxy:
-        sam_results     = sam(frame_bgr, bboxes=boxes_xyxy, verbose=False)[0]
-        annotated_frame = sam_results.plot()
+        try:
+            sam_results     = sam(frame_bgr, bboxes=boxes_xyxy, verbose=False)[0]
+            annotated_frame = sam_results.plot()
+        except Exception as sam_err:
+            print(f"[pipeline] SAM failed on frame {frame_idx}: {sam_err} — using YOLO plot fallback")
+            annotated_frame = yolo_results.plot()
     else:
         annotated_frame = frame_bgr.copy()
 
@@ -320,6 +325,7 @@ def run_wall_cam_pipeline(
     sample_every_n: int = 3,
     conf_threshold: float = 0.15,
     proximity_threshold: float = 0.25,
+    camera_source: str = "WALL_CAM",
 ) -> tuple:
     """
     Runs YOLO + SAM3 on wall-cam video.
@@ -368,12 +374,17 @@ def run_wall_cam_pipeline(
 
             timestamp = round(frame_idx / fps, 3)
 
-            detections, hazards, annotated = _process_frame(
-                frame_bgr, frame_idx, fps,
-                yolo, sam,
-                worker_safety_log,
-                conf_threshold, proximity_threshold,
-            )
+            try:
+                detections, hazards, annotated = _process_frame(
+                    frame_bgr, frame_idx, fps,
+                    yolo, sam,
+                    worker_safety_log,
+                    conf_threshold, proximity_threshold,
+                )
+            except Exception as frame_err:
+                print(f"[pipeline] frame {frame_idx} error (skipping): {frame_err}")
+                frame_idx += 1
+                continue
 
             for d in detections:
                 all_classes.add(d["class_name"])
@@ -397,10 +408,12 @@ def run_wall_cam_pipeline(
 
             if hazards:
                 frame_filename = f"frame_{frame_idx:06d}.jpg"
-                cv2.imwrite(str(frames_dir / frame_filename), annotated)
+                ok = cv2.imwrite(str(frames_dir / frame_filename), annotated)
+                if not ok:
+                    print(f"[pipeline] WARNING: failed to write frame {frame_filename}")
                 crops = _save_person_crops(frame_bgr, detections, frame_idx, crops_dir)
-                frame_record["frame_path"]    = frame_filename
-                frame_record["person_crops"]  = crops
+                frame_record["frame_path"]   = frame_filename
+                frame_record["person_crops"] = crops
                 hazard_events.append(frame_record)
                 for h in hazards:
                     hazard_counts[h["hazard_type"]] = hazard_counts.get(h["hazard_type"], 0) + 1
@@ -441,7 +454,13 @@ def run_wall_cam_pipeline(
     (job_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
     print("[pipeline] starting VLM assessment pass")
-    vlm_results = assess_all_events(hazard_events, job_dir, gap_seconds=3.0)
+    vlm_results = assess_all_events(
+        hazard_events,
+        job_dir,
+        video_path=video_path,
+        summary=summary,
+        camera_source=camera_source,
+    )
     summary["vlm_events_assessed"] = len(vlm_results)
 
     return summary, hazard_events, vlm_results

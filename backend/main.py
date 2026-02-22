@@ -31,6 +31,21 @@ from pipeline.wall_cam import run_wall_cam_pipeline
 async def lifespan(app: FastAPI):
     init_db()
     print("ML service started — SQLite ready")
+    # Pre-warm all models so the first job doesn't hit cold-start OOM or CUDA init errors
+    import asyncio, concurrent.futures
+    loop = asyncio.get_event_loop()
+    def _warm():
+        from pipeline.wall_cam import _get_yolo, _get_sam
+        from pipeline.vlm_step import _get_model
+        print("[startup] warming YOLO ...")
+        _get_yolo()
+        print("[startup] warming SAM ...")
+        _get_sam()
+        print("[startup] warming VLM ...")
+        _get_model()
+        print("[startup] all models ready")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        await loop.run_in_executor(pool, _warm)
     yield
 
 app = FastAPI(title="IronSite ML Service", lifespan=lifespan)
@@ -259,32 +274,58 @@ def _run_detection_job(
         db.refresh(shift)
         print(f"[{camera_source}] {job_id} — shift created: {shift.id}")
 
-        # Warm up models before pipeline (loads into GPU memory once)
-        print(f"[{camera_source}] {job_id} — loading models")
+        # Step 1 — model warm-up
+        print(f"[{camera_source}] {job_id} — [1/4] loading YOLO + SAM")
         from pipeline.wall_cam import _get_yolo, _get_sam
         _get_yolo(); _get_sam()
-        print(f"[{camera_source}] {job_id} — models loaded, running pipeline")
+        print(f"[{camera_source}] {job_id} — [1/4] models ready")
 
+        # Step 2 — YOLO + SAM pipeline
+        print(f"[{camera_source}] {job_id} — [2/4] running YOLO+SAM pipeline")
         summary, hazard_events, vlm_results = run_wall_cam_pipeline(
             video_path=video_path,
             job_dir=job_dir,
             site_id=site_id,
             date=date,
+            camera_source=camera_source.value,
         )
-        print(f"[{camera_source}] {job_id} — pipeline done: {summary}")
+        print(
+            f"[{camera_source}] {job_id} — [2/4] pipeline done: "
+            f"{summary['frames_processed']} frames, "
+            f"{summary['frames_with_hazards']} hazard frames, "
+            f"{summary['workers_tracked']} workers"
+        )
+
+        # Step 3 — VLM (may have errored; fallback to YOLO results)
+        valid_vlm = [r for r in vlm_results if r.get("vlm") and not r.get("error")]
+        errored_vlm = [r for r in vlm_results if r.get("error")]
+        print(
+            f"[{camera_source}] {job_id} — [3/4] VLM: "
+            f"{len(valid_vlm)} valid, {len(errored_vlm)} errored of {len(vlm_results)} events"
+        )
+        if errored_vlm:
+            print(f"[{camera_source}] {job_id} — VLM errors: {[r['error'] for r in errored_vlm[:3]]}")
+
+        # Step 4 — DB write
+        print(f"[{camera_source}] {job_id} — [4/4] writing events to DB")
 
         # Write events to DB
         # If VLM ran: use VLM-confirmed hazards (higher quality)
         # If VLM is disabled (vlm_results=[]): fall back to raw YOLO hazard frames
         events_written = 0
+        seen_violations: set = set()
 
-        if vlm_results:
+        if any(r.get("vlm") and not r.get("error") for r in vlm_results):
             for result in vlm_results:
                 if result["error"] or not result["vlm"]:
                     continue
                 ev   = result["event"]
                 vlm  = result["vlm"]
                 for hazard in vlm["hazards"]:
+                    vtype = hazard.get("violation_type")
+                    if vtype in seen_violations:
+                        continue
+                    seen_violations.add(vtype)
                     sev_str  = hazard.get("severity", "MEDIUM")
                     severity = Severity[sev_str] if sev_str in Severity.__members__ else Severity.MEDIUM
                     event = SafetyEvent(
@@ -292,10 +333,10 @@ def _run_detection_job(
                         worker_id=worker.id,
                         camera_source=camera_source,
                         event_category=EventCategory.VIOLATION,
-                        violation_type=hazard.get("violation_type"),
+                        violation_type=vtype,
                         severity=severity,
                         video_timestamp=ev["representative_timestamp"],
-                        clip_path=ev.get("representative_frame_path"),
+                        clip_path=hazard.get("best_frame_path") or ev.get("representative_frame_path"),
                         metadata_json=json.dumps({
                             "explanation":       hazard.get("explanation"),
                             "recommendation":    hazard.get("recommendation"),
@@ -315,9 +356,13 @@ def _run_detection_job(
                     worker.total_violations += 1
                     events_written += 1
         else:
-            # VLM disabled — write one SafetyEvent per YOLO hazard frame directly
+            # VLM disabled — write one SafetyEvent per unique (track_id, violation_type) pair
             for frame in hazard_events:
                 for hazard in frame.get("hazards", []):
+                    dedup_key = (hazard.get("track_id"), hazard.get("violation_type", "PPE_MISSING"))
+                    if dedup_key in seen_violations:
+                        continue
+                    seen_violations.add(dedup_key)
                     sev_str  = hazard.get("severity", "MEDIUM")
                     severity = Severity[sev_str] if sev_str in Severity.__members__ else Severity.MEDIUM
                     event = SafetyEvent(
