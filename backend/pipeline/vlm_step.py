@@ -1,45 +1,69 @@
 """
-vlm_step.py — VLM hazard assessment stage
+vlm_step.py — VLM hazard assessment using Qwen3-VL-8B-Instruct via HuggingFace transformers
 
-Runs after YOLO. Takes temporal event windows produced by group_into_events(),
-sends the most representative frame + crop to Llama 3.2 Vision via Ollama,
-and returns structured VLMAssessment objects ready for DB ingestion.
-
-Security: all file access is sandboxed to job_dir via _safe_path().
+Per-event flow:
+  1. group_into_events()     → cluster consecutive hazard frames within 3s gaps
+  2. run_vlm_on_event()      → send representative frame(s) to Qwen3-VL
+  3. _extract_json()         → parse structured VLMAssessment from model output
+  4. assess_all_events()     → run over all events, write vlm_assessments.json
 """
 
 from __future__ import annotations
 
-import base64
 import json
+import re
 import os
 from pathlib import Path
 from typing import Literal, Optional
 
-import ollama
+import torch
+from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+from qwen_vl_utils import process_vision_info
 from pydantic import BaseModel, field_validator
 
 # ---------------------------------------------------------------------------
-# Constants
+# Config
 # ---------------------------------------------------------------------------
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
-OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
-
-MAX_IMAGE_BYTES = 10 * 1024 * 1024    # 10 MB — reject anything larger
+MODEL_ID       = os.getenv("VLM_MODEL_ID",     "Qwen/Qwen3-VL-8B-Instruct")
+MAX_PIXELS     = int(os.getenv("VLM_MAX_PIXELS",    "100352"))   # ~317x317 — tune for VRAM
+MAX_NEW_TOKENS = int(os.getenv("VLM_MAX_NEW_TOKENS", "1024"))
+MAX_FRAMES_PER_EVENT = 3      # send up to 3 frames per event window for temporal context
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 # ---------------------------------------------------------------------------
-# Output schema — maps directly to safety_events + metadata_json
+# Model singleton — loaded once, shared across all inference calls
+# ---------------------------------------------------------------------------
+
+_model     = None
+_processor = None
+
+
+def _get_model():
+    global _model, _processor
+    if _model is None:
+        print(f"[vlm] loading {MODEL_ID} ...")
+        _model = Qwen3VLForConditionalGeneration.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",            # splits across available GPUs automatically
+        )
+        _processor = AutoProcessor.from_pretrained(MODEL_ID)
+        print("[vlm] model loaded")
+    return _model, _processor
+
+
+# ---------------------------------------------------------------------------
+# Structured output schema
 # ---------------------------------------------------------------------------
 
 class PPEStatus(BaseModel):
-    helmet:  Literal["PRESENT", "ABSENT", "UNCLEAR"]
-    vest:    Literal["PRESENT", "ABSENT", "UNCLEAR"]
-    gloves:  Literal["PRESENT", "ABSENT", "UNCLEAR"]
-    # Additional PPE — included if visible
-    harness:         Optional[Literal["PRESENT", "ABSENT", "UNCLEAR"]] = None
-    eye_protection:  Optional[Literal["PRESENT", "ABSENT", "UNCLEAR"]] = None
-    safety_boots:    Optional[Literal["PRESENT", "ABSENT", "UNCLEAR"]] = None
+    helmet:         Literal["PRESENT", "ABSENT", "UNCLEAR"]
+    vest:           Literal["PRESENT", "ABSENT", "UNCLEAR"]
+    gloves:         Literal["PRESENT", "ABSENT", "UNCLEAR"]
+    harness:        Optional[Literal["PRESENT", "ABSENT", "UNCLEAR"]] = None
+    eye_protection: Optional[Literal["PRESENT", "ABSENT", "UNCLEAR"]] = None
+    safety_boots:   Optional[Literal["PRESENT", "ABSENT", "UNCLEAR"]] = None
 
 
 class HazardDetail(BaseModel):
@@ -52,9 +76,9 @@ class HazardDetail(BaseModel):
         "SCAFFOLD_VIOLATION",
         "BEHAVIORAL_UNSAFE",
     ]
-    severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-    explanation: str        # what the model sees — specific and brief
-    recommendation: str     # one actionable instruction
+    severity:       Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    explanation:    str
+    recommendation: str
 
     @field_validator("explanation", "recommendation")
     @classmethod
@@ -65,23 +89,14 @@ class HazardDetail(BaseModel):
 
 
 class VLMAssessment(BaseModel):
-    # Scene context
-    scene_summary:   str        # ≤ 2 sentences describing the overall scene
-    worker_count:    int        # number of workers visible
-    equipment_present: list[str]  # e.g. ["excavator", "scaffold"]
-
-    # Per-worker PPE (best effort — one entry per visible worker)
-    ppe_per_worker: list[PPEStatus]
-
-    # Reasoning trace — stored for audit, not shown to end users
-    reasoning: str
-
-    # Findings
-    hazards:    list[HazardDetail]   # empty = no violations found
-    no_hazards: bool                 # explicit clean-bill flag
-
-    # Model confidence in this assessment
-    confidence: Literal["LOW", "MEDIUM", "HIGH"]
+    scene_summary:     str
+    worker_count:      int
+    equipment_present: list[str]
+    ppe_per_worker:    list[PPEStatus]
+    reasoning:         str
+    hazards:           list[HazardDetail]
+    no_hazards:        bool
+    confidence:        Literal["LOW", "MEDIUM", "HIGH"]
 
     @field_validator("worker_count")
     @classmethod
@@ -92,74 +107,119 @@ class VLMAssessment(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# System prompt
-# (prompt repetition is intentional — reinforces key rules across the prompt)
+# Prompts — fill in SYSTEM_PROMPT with your construction safety context
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are Marcus Chen, a senior construction safety manager with 22 years of experience on \
-heavy civil, commercial, and industrial construction projects. You are certified in OSHA 1926 Construction \
-Standards and hold a NEBOSH Construction Certificate.
+SYSTEM_PROMPT = """\
+You are Marcus Chen. You have 24 years as a senior construction safety manager — 11 of them as \
+Chief Safety Officer on high-risk civil infrastructure projects across South-East Asia and the \
+Middle East. You hold NEBOSH Construction, IOSH Managing Safely, and OSHA 1926 certifications. \
+You have personally witnessed three fatal incidents in your career. Each one was preventable. \
+You carry that weight every single day. You do not flag violations to make numbers — you flag them \
+because you know exactly what happens when someone doesn't.
 
-You are reviewing flagged footage from the IronSite wall-mounted safety camera. Your YOLO pre-detection \
-system has already flagged this frame as a potential violation. Your job is to confirm, correct, or expand \
-on that detection with your expert eye.
+You are now reviewing flagged footage from an AI-assisted wall-mounted safety camera. Your \
+YOLO detection system has already identified potential violations in these frames. Your job is \
+to confirm, expand, or reject those findings with your expert judgment. You are the last \
+human-equivalent checkpoint before this footage is logged as an official safety incident.
 
-═══════════════════════════════════════════════════════════
-MANDATORY PPE REQUIREMENTS — OSHA 1926 CONSTRUCTION STANDARD
-Every worker visible on site MUST be wearing ALL THREE of the following at all times:
+═══════════════════════════════════════════════════════════════════════
+MANDATORY SAFETY RULES — YOU MUST CHECK EVERY WORKER AGAINST ALL FOUR
+═══════════════════════════════════════════════════════════════════════
 
-  1. HARD HAT / SAFETY HELMET — OSHA 1926.100
-     Hard hat must be worn correctly: brim forward, chinstrap engaged if at height.
-     A bare head, hair net only, bump cap, or backwards hat IS a violation.
+RULE 1 — BASIC PPE (applies to every worker on foot at all times):
+  • Hard hat — must be worn correctly: brim forward, chinstrap used at height.
+    A bare head, backwards cap, bump cap, or hair net = VIOLATION.
+  • High-visibility retroreflective safety vest — must be worn and fully fastened.
+    Open vest, vest used as a jacket, or no vest = VIOLATION.
+  • Clothing — shoulders and legs must be covered. Short sleeves, shorts = VIOLATION.
+  • Safety footwear — closed-toe boots covering the foot. Trainers, sandals = VIOLATION.
+  • Eye/face protection — required when cutting, welding, grinding, or drilling.
+    No goggles/face shield during these activities = VIOLATION.
+  VIOLATION TYPE → PPE_MISSING
 
-  2. HIGH-VISIBILITY SAFETY VEST — OSHA 1926.201
-     Must be a Class 2 or Class 3 reflective vest, fully zipped or fastened.
-     An open vest, vest worn as a jacket, or no vest at all IS a violation.
+RULE 2 — FALL PROTECTION (harness):
+  • Any worker at height ≥ 3 metres where the edge has NO guardrail or edge protection \
+must wear a safety harness, visibly connected to an anchor point.
+  • Visible scaffold, ladder, elevated platform, or roof edge with no harness = VIOLATION.
+  VIOLATION TYPE → FALL_PROTECTION_MISSING
 
-  3. PROTECTIVE GLOVES — OSHA 1926.28
-     Must be appropriate for the task. Bare hands while handling materials,
-     tools, or equipment IS a violation. Gloves hanging from a belt IS a violation.
+RULE 3 — EDGE PROTECTION:
+  • Underground excavations ≥ 3 metres deep with steep retaining walls require \
+guardrails, fences, or clearly marked edge warning barriers.
+  • A worker standing at or near the edge of such a trench or pit without visible edge \
+protection = VIOLATION.
+  VIOLATION TYPE → SCAFFOLD_VIOLATION (use this for unguarded excavation edges)
 
-Additionally check for:
-  4. FALL PROTECTION HARNESS — required when working at any height > 6 feet (OSHA 1926.502)
-  5. EYE PROTECTION — required near cutting, grinding, chemical, or debris hazards (OSHA 1926.102)
-  6. SAFETY BOOTS — required on all active construction sites (OSHA 1926.96)
-═══════════════════════════════════════════════════════════
+RULE 4 — EXCAVATOR BLIND SPOTS AND OPERATING RADIUS:
+  • No worker may be within the operating radius or in the blind spots of an excavator \
+that is in operation or has an operator inside.
+  • Any worker visible within the swing arc or close proximity to an operating excavator \
+= CRITICAL violation.
+  VIOLATION TYPE → PROXIMITY_HAZARD
 
-SCENE HAZARDS TO ASSESS — beyond PPE:
+ADDITIONAL HAZARDS TO ASSESS:
+  • PHONE USE — worker visibly holding/looking at phone in active work zone near machinery.
+    BEHAVIORAL_UNSAFE, MEDIUM severity.
+  • RUNNING — worker running on site. Prohibited due to trip/collision risk.
+    BEHAVIORAL_UNSAFE, MEDIUM severity.
+  • ZONE BREACH — worker inside a restricted/exclusion zone marked by cones, barriers, or signage.
+    ZONE_BREACH, HIGH severity.
+  • LADDER MISUSE — ladder not secured, worker climbing without 3-point contact, overreaching.
+    LADDER_MISUSE, HIGH severity.
 
-  PROXIMITY: Is any worker within the swing radius or operating envelope of an excavator, \
-crane, forklift, or dump truck? This is HIGH-CRITICAL severity.
+═══════════════════════════════════════════════════════════════════════
+REMEMBER — THESE RULES APPLY TO EVERY WORKER IN EVERY FRAME:
+  Rule 1: Hard hat + hi-vis vest + covered clothing + closed footwear. Missing ANY = PPE_MISSING.
+  Rule 2: Harness required at ≥ 3m height without edge protection. Missing = FALL_PROTECTION_MISSING.
+  Rule 3: Guardrails required at open excavation edges ≥ 3m deep. Missing = SCAFFOLD_VIOLATION.
+  Rule 4: No workers in excavator blind spots or operating radius. Breached = PROXIMITY_HAZARD.
+═══════════════════════════════════════════════════════════════════════
 
-  FALL RISK: Is any worker on a scaffold, ladder, elevated platform, or roof edge without a \
-visible harness or guardrail? HIGH severity. Use violation_type FALL_PROTECTION_MISSING.
+YOUR COGNITIVE PROCESS — follow this exact sequence in your reasoning field:
 
-  PHONE USE: Is any worker visibly holding or looking at a mobile phone while in an active \
-work zone or near operating machinery? MEDIUM severity. Use violation_type BEHAVIORAL_UNSAFE.
+  STAGE 1 — SCENE SCAN:
+    Describe the environment. What type of construction site is this? What is happening?
+    What equipment, machinery, and hazards are present? What is the lighting and visibility?
 
-  RUNNING: Is any worker running on the site? Running is prohibited on all active construction \
-sites due to collision and trip risk. MEDIUM severity. Use violation_type BEHAVIORAL_UNSAFE.
+  STAGE 2 — WORKER INVENTORY:
+    Count every visible worker. Assign them labels (Worker A, Worker B, etc.).
+    Note their position, activity, and proximity to equipment or edges.
 
-  ZONE BREACH: Is any worker in a restricted or exclusion zone (indicated by cones, barriers, \
-or signage)? HIGH severity. Use violation_type ZONE_BREACH.
+  STAGE 3 — RULE-BY-RULE AUDIT (for each worker):
+    Check Rule 1: Is the hard hat present and correct? Is the vest worn and fastened?
+      Are shoulders and legs covered? Is footwear appropriate?
+    Check Rule 2: Are they at height? Is a harness visible and connected?
+    Check Rule 3: Are they near an unguarded excavation edge?
+    Check Rule 4: Are they within the operating radius or blind spot of an excavator?
+    Check additional: Phone use? Running? Zone breach? Ladder misuse?
 
-═══════════════════════════════════════════════════════════
-IMPORTANT — REMEMBER THESE RULES:
-- Every worker must have: HARD HAT + SAFETY VEST + GLOVES. Missing any one = PPE_MISSING violation.
-- Assess each visible worker individually. Do not assume PPE is present if you cannot see it clearly.
-- If unsure whether PPE is present, mark as ABSENT — safety-first.
-- Flag phone use and running as BEHAVIORAL_UNSAFE — these are real and detectable violations.
-- Flag missing harness on scaffold/ladder as FALL_PROTECTION_MISSING.
-- YOLO context is provided as a hint. You may confirm, correct, or add to it.
-- Output ONLY valid JSON. No extra explanation outside the JSON.
-═══════════════════════════════════════════════════════════
+  STAGE 4 — CROSS-VERIFICATION:
+    Before logging any violation, ask yourself: "Can I clearly see evidence of this in at least
+    one of the frames provided?" If the violation is ambiguous due to occlusion, distance, or
+    poor lighting — do NOT flag it. Set confidence to LOW and note the uncertainty.
+    If you are uncertain whether PPE is present, default to ABSENT (safety-first).
 
-Your reasoning field must follow this structure:
-SCENE SCAN: [what is in the frame — describe environment, workers, equipment]
-WORKER-BY-WORKER: [for each worker: what PPE is visible, what is missing]
-EQUIPMENT ASSESSMENT: [any machinery present, is anyone in proximity]
-REGULATORY VERDICT: [which OSHA rules are being violated and why]
-CONFIDENCE NOTE: [why you are HIGH/MEDIUM/LOW confidence — lighting, occlusion, distance]"""
+  STAGE 5 — DUPLICATION CHECK:
+    Review the already-flagged violations list provided in the user context.
+    Do NOT re-flag a violation for the same worker (track ID) if it has already been logged
+    for this session. A worker flagged for PPE_MISSING (no hard hat) in a previous event
+    window should NOT be flagged again for the same item unless their situation has changed.
+    New violations (different type, different worker) should always be logged.
+
+  STAGE 6 — VERDICT:
+    Produce your final structured output. Every hazard entry must correspond to a real,
+    visually confirmed violation you identified in Stage 3 and verified in Stage 4.
+
+═══════════════════════════════════════════════════════════════════════
+CRITICAL DIRECTIVES — READ THESE AND APPLY THEM EVERY TIME:
+  1. You MUST check every visible worker against all four rules. No exceptions.
+  2. You MUST NOT flag a violation you cannot visually confirm in the frames provided.
+  3. You MUST NOT duplicate a violation already logged for the same worker in this session.
+  4. If unsure whether PPE is present, mark it ABSENT. Safety-first is not optional.
+  5. Your reasoning field is a mandatory audit log — write it as if a court will read it.
+  6. Output ONLY valid JSON. Zero text outside the JSON object.
+═══════════════════════════════════════════════════════════════════════"""
 
 
 USER_TEMPLATE = """\
@@ -167,41 +227,41 @@ YOLO PRE-DETECTION CONTEXT:
   Flagged hazards : {yolo_hazards}
   Detected classes: {yolo_classes}
   Frame timestamp : {timestamp}s into video
-  Event window    : {event_start}s – {event_end}s ({frame_count} flagged frames in this window)
+  Event window    : {event_start}s – {event_end}s ({frame_count} flagged frames)
 
-REMEMBER: Check for hard hat, safety vest, AND gloves on every visible worker. \
-Missing any one of these is a PPE_MISSING violation. Also assess proximity to equipment, \
-fall risks, and any other site hazards you observe.
+ALREADY FLAGGED THIS SESSION (do NOT re-log these — deduplication required):
+{already_flagged}
 
-Analyze this construction site image and return your structured assessment."""
+REMINDER BEFORE YOU START:
+  Rule 1 — Every worker needs: hard hat + hi-vis vest + covered clothing + closed footwear.
+  Rule 2 — Harness required at ≥ 3m height without edge protection.
+  Rule 3 — Guardrails required at open excavation edges ≥ 3m deep.
+  Rule 4 — No workers within excavator operating radius or blind spots.
+  Cross-verify each violation visually before flagging. No duplicates. No assumptions.
+
+Return a JSON object matching this exact schema:
+{schema}
+
+Output ONLY valid JSON. No explanation outside the JSON."""
 
 
 # ---------------------------------------------------------------------------
-# Security — path sandboxing
+# Security — sandboxes file access to job_dir
 # ---------------------------------------------------------------------------
 
-def _safe_path(job_dir: Path, relative: str) -> Path:
-    """
-    Resolves a relative path against job_dir and asserts it stays within job_dir.
-    Raises ValueError on path traversal attempts.
-    """
-    resolved = (job_dir / relative).resolve()
+def _safe_path(base_dir: Path, relative: str) -> Path:
+    resolved = (base_dir / relative).resolve()
     try:
-        resolved.relative_to(job_dir.resolve())
+        resolved.relative_to(base_dir.resolve())
     except ValueError:
-        raise ValueError(f"Path traversal blocked: {relative!r} escapes job_dir")
+        raise ValueError(f"Path traversal blocked: {relative!r}")
     if not resolved.exists():
         raise FileNotFoundError(f"File not found: {resolved}")
     if not resolved.is_file():
         raise ValueError(f"Not a regular file: {resolved}")
+    if resolved.stat().st_size > MAX_IMAGE_BYTES:
+        raise ValueError(f"Image too large: {resolved}")
     return resolved
-
-
-def _load_image_b64(path: Path) -> str:
-    size = path.stat().st_size
-    if size > MAX_IMAGE_BYTES:
-        raise ValueError(f"Image too large ({size} bytes) — max {MAX_IMAGE_BYTES}")
-    return base64.b64encode(path.read_bytes()).decode()
 
 
 # ---------------------------------------------------------------------------
@@ -209,16 +269,11 @@ def _load_image_b64(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def group_into_events(hazard_frames: list[dict], gap_seconds: float = 3.0) -> list[dict]:
-    """
-    Collapses consecutive hazard frames within gap_seconds into a single event window.
-    Selects the representative frame = highest total YOLO detection confidence in the window.
-    """
+    """Collapses consecutive hazard frames within gap_seconds into a single event window."""
     if not hazard_frames:
         return []
-
     events: list[dict] = []
     current: list[dict] = [hazard_frames[0]]
-
     for frame in hazard_frames[1:]:
         if frame["timestamp_seconds"] - current[-1]["timestamp_seconds"] <= gap_seconds:
             current.append(frame)
@@ -230,13 +285,11 @@ def group_into_events(hazard_frames: list[dict], gap_seconds: float = 3.0) -> li
 
 
 def _build_event(frames: list[dict]) -> dict:
-    # Representative frame = highest sum of YOLO detection confidences
     def total_conf(f: dict) -> float:
         return sum(d["confidence"] for d in f.get("detections", []))
 
     rep = max(frames, key=total_conf)
 
-    # Worst severity across the window
     sev_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
     peak_sev = "LOW"
     for f in frames:
@@ -245,73 +298,123 @@ def _build_event(frames: list[dict]) -> dict:
                 peak_sev = h["severity"]
 
     return {
-        "start_ts":            frames[0]["timestamp_seconds"],
-        "end_ts":              frames[-1]["timestamp_seconds"],
-        "duration_seconds":    round(frames[-1]["timestamp_seconds"] - frames[0]["timestamp_seconds"], 3),
-        "frame_count":         len(frames),
-        "peak_yolo_severity":  peak_sev,
-        "representative_frame": rep,          # best frame to send to VLM
-        "all_frames":          frames,
-        # Aggregate YOLO hazard types across the window
-        "yolo_hazard_types":   list({h["hazard_type"] for f in frames for h in f.get("hazards", [])}),
-        "yolo_classes_seen":   list({d["class_name"] for f in frames for d in f.get("detections", [])}),
+        "start_ts":           frames[0]["timestamp_seconds"],
+        "end_ts":             frames[-1]["timestamp_seconds"],
+        "duration_seconds":   round(frames[-1]["timestamp_seconds"] - frames[0]["timestamp_seconds"], 3),
+        "frame_count":        len(frames),
+        "peak_yolo_severity": peak_sev,
+        "representative_frame": rep,
+        "all_frames":         frames,
+        "yolo_hazard_types":  list({h["hazard_type"] for f in frames for h in f.get("hazards", [])}),
+        "yolo_classes_seen":  list({d["class_name"] for f in frames for d in f.get("detections", [])}),
     }
 
 
 # ---------------------------------------------------------------------------
-# VLM call
+# JSON extraction from raw model output
 # ---------------------------------------------------------------------------
 
-def run_vlm_on_event(event: dict, job_dir: Path) -> VLMAssessment:
-    """
-    Runs the VLM on a single temporal event window.
-    Sends the representative frame (full frame preferred, person crop as fallback).
-    """
-    rep = event["representative_frame"]
+def _extract_json(text: str) -> dict:
+    """Handles markdown code blocks and raw JSON objects in model output."""
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        return json.loads(match.group(1))
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return json.loads(match.group(0))
+    raise ValueError(f"No JSON found in model output: {text[:300]}")
 
-    # Prefer the full flagged frame — more context for the VLM
-    image_path: Optional[Path] = None
+
+# ---------------------------------------------------------------------------
+# VLM inference — one event window
+# ---------------------------------------------------------------------------
+
+def run_vlm_on_event(event: dict, job_dir: Path, already_flagged: list[dict] | None = None) -> VLMAssessment:
+    model, processor = _get_model()
+
+    rep = event["representative_frame"]
+    frames_dir = job_dir / "frames"
+
+    # Collect up to MAX_FRAMES_PER_EVENT image paths from this event window
+    image_paths: list[Path] = []
+
+    # Representative frame first
     if rep.get("frame_path"):
         try:
-            image_path = _safe_path(job_dir / "frames", rep["frame_path"])
+            image_paths.append(_safe_path(frames_dir, rep["frame_path"]))
         except (ValueError, FileNotFoundError):
             pass
 
-    # Fallback: first person crop
-    if image_path is None and rep.get("person_crops"):
-        crop_rel = rep["person_crops"][0]["path"]
-        try:
-            image_path = _safe_path(job_dir / "crops", crop_rel)
-        except (ValueError, FileNotFoundError):
-            pass
+    # Fill remaining slots from other frames in the window
+    for f in event.get("all_frames", []):
+        if len(image_paths) >= MAX_FRAMES_PER_EVENT:
+            break
+        fp = f.get("frame_path")
+        if fp and fp != rep.get("frame_path"):
+            try:
+                image_paths.append(_safe_path(frames_dir, fp))
+            except (ValueError, FileNotFoundError):
+                continue
 
-    if image_path is None:
-        raise FileNotFoundError(f"No accessible image for event at {rep['timestamp_seconds']}s")
+    if not image_paths:
+        raise FileNotFoundError(f"No accessible frames for event at {rep['timestamp_seconds']}s")
 
-    img_b64 = _load_image_b64(image_path)
-
-    user_msg = USER_TEMPLATE.format(
-        yolo_hazards  = json.dumps(event["yolo_hazard_types"]),
-        yolo_classes  = json.dumps(event["yolo_classes_seen"]),
-        timestamp     = rep["timestamp_seconds"],
-        event_start   = event["start_ts"],
-        event_end     = event["end_ts"],
-        frame_count   = event["frame_count"],
+    flagged_summary = (
+        "\n".join(
+            f"  - Worker track_id={f['track_id']}: {f['violation_type']}"
+            for f in (already_flagged or [])
+        ) or "  None yet — this is the first event in this session."
     )
 
-    client = ollama.Client(host=OLLAMA_HOST)
-    response = client.chat(
-        model=OLLAMA_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user_msg, "images": [img_b64]},
-        ],
-        format=VLMAssessment.model_json_schema(),
-        options={"temperature": 0.05, "num_predict": 1024},
+    user_text = USER_TEMPLATE.format(
+        yolo_hazards    = json.dumps(event["yolo_hazard_types"]),
+        yolo_classes    = json.dumps(event["yolo_classes_seen"]),
+        timestamp       = rep["timestamp_seconds"],
+        event_start     = event["start_ts"],
+        event_end       = event["end_ts"],
+        frame_count     = event["frame_count"],
+        already_flagged = flagged_summary,
+        schema          = json.dumps(VLMAssessment.model_json_schema(), indent=2),
     )
 
-    raw = response["message"]["content"]
-    return VLMAssessment.model_validate_json(raw)
+    # Build message — images first, text last (Qwen3-VL convention)
+    content = [
+        {"type": "image", "image": str(p), "max_pixels": MAX_PIXELS}
+        for p in image_paths
+    ]
+    content.append({"type": "text", "text": user_text})
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": content},
+    ]
+
+    text_input = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(
+        text=[text_input],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    ).to(model.device)
+
+    with torch.no_grad():
+        generated_ids = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
+
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    output_text = processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+
+    raw = _extract_json(output_text)
+    return VLMAssessment.model_validate(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -323,39 +426,49 @@ def assess_all_events(
     job_dir: Path,
     gap_seconds: float = 3.0,
 ) -> list[dict]:
-    """
-    Groups hazard frames into events, runs VLM on each, returns enriched event dicts.
-    Writes vlm_assessments.json to job_dir.
-    """
-    events = group_into_events(hazard_frames, gap_seconds)
+    """Groups hazard frames into events, runs VLM on each, writes vlm_assessments.json."""
+    events  = group_into_events(hazard_frames, gap_seconds)
     results: list[dict] = []
+
+    # Session-level deduplication tracker — {(track_id, violation_type)} already logged
+    session_flagged: list[dict] = []
 
     for i, event in enumerate(events):
         print(f"[vlm] event {i+1}/{len(events)} — {event['start_ts']}s–{event['end_ts']}s")
         try:
-            assessment = run_vlm_on_event(event, job_dir)
+            assessment = run_vlm_on_event(event, job_dir, already_flagged=session_flagged)
+
+            # Update session tracker with newly confirmed violations
+            for hazard in assessment.hazards:
+                track_id = next(
+                    (f.get("track_id") for f in event["representative_frame"].get("hazards", [])
+                     if f.get("violation_type") == hazard.violation_type),
+                    None,
+                )
+                session_flagged.append({
+                    "track_id":      track_id,
+                    "violation_type": hazard.violation_type,
+                    "event_ts":       event["start_ts"],
+                })
+
             results.append({
                 "event": {
-                    "start_ts":          event["start_ts"],
-                    "end_ts":            event["end_ts"],
-                    "duration_seconds":  event["duration_seconds"],
-                    "frame_count":       event["frame_count"],
-                    "peak_yolo_severity": event["peak_yolo_severity"],
-                    "yolo_hazard_types": event["yolo_hazard_types"],
+                    "start_ts":                  event["start_ts"],
+                    "end_ts":                    event["end_ts"],
+                    "duration_seconds":          event["duration_seconds"],
+                    "frame_count":               event["frame_count"],
+                    "peak_yolo_severity":        event["peak_yolo_severity"],
+                    "yolo_hazard_types":         event["yolo_hazard_types"],
                     "representative_frame_path": event["representative_frame"].get("frame_path"),
                     "representative_timestamp":  event["representative_frame"]["timestamp_seconds"],
                 },
-                "vlm": assessment.model_dump(),
+                "vlm":   assessment.model_dump(),
                 "error": None,
             })
         except Exception as exc:
             print(f"[vlm] error on event {i+1}: {exc}")
-            results.append({
-                "event": event,
-                "vlm":   None,
-                "error": str(exc),
-            })
+            results.append({"event": event, "vlm": None, "error": str(exc)})
 
     (job_dir / "vlm_assessments.json").write_text(json.dumps(results, indent=2))
-    print(f"[vlm] done — {len(results)} events assessed, written to vlm_assessments.json")
+    print(f"[vlm] done — {len(results)} events assessed")
     return results
