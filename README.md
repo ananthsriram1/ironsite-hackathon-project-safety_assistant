@@ -109,6 +109,26 @@ At the end of a shift, the dashboard generates a per-worker report:
 
 ---
 
+## Results
+
+Example outputs from the pipeline on construction-site footage: PPE compliance (compliant vs violation) and posture/ergonomic risk (good posture vs at-risk).
+
+### PPE: compliant vs violation
+
+| No violation (compliant) | Violation (missing PPE) |
+|--------------------------|--------------------------|
+| [![PPE compliant — safety vest detected](assets/results/ppe_compliant.png)](assets/results/ppe_compliant.png) | [![PPE violation — no glove](assets/results/ppe_violation.png)](assets/results/ppe_violation.png) |
+| **Compliant: vest** — Worker building a concrete block wall; system correctly identifies the high-visibility safety vest and labels the worker as compliant. (Wall-cam / site view.) | **Violation: no glove** — POV frame; system flags an exposed hand with a red bounding box and label "VIOLATION: NO GLOVE" for missing hand protection. |
+
+### Posture: no risk vs risk
+
+| No risk (good posture) | Risk (ergonomic hazard) |
+|------------------------|--------------------------|
+| [![Posture: good](assets/results/posture_good.png)](assets/results/posture_good.png) | [![Posture risk: overreach](assets/results/posture_risk_overreach.png)](assets/results/posture_risk_overreach.png) |
+| **Worker #825 — Posture: Good** — Worker segmented (blue mask), green bounding box; pose and PPE (hard hat, vest) assessed as compliant. (POV.) | **Worker #910 — Risk 3: OVERREACH** — Worker segmented; red box and label indicate elevated arm/reach classified as OVERREACH with risk level 3 for musculoskeletal strain. (POV.) |
+
+---
+
 ## Data & Datasets
 
 We used a substantial amount of video and derived data to develop and validate the posture and PPE pipelines.
