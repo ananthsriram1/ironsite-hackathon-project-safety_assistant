@@ -5,6 +5,7 @@
 
 # Job outputs (frames, crops, detections)
 backend/jobs/
+VLM Setup.py
 backend/data/
 
 # Datasets & data files
@@ -57,8 +58,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+backend/lib/
+backend/lib64/
 parts/
 sdist/
 var/

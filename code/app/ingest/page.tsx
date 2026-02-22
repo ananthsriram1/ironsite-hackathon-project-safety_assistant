@@ -170,8 +170,8 @@ function JobCard({ job }: { job: JobStatus }) {
     job.status === "FAILED" ? "text-red-400" :
     "text-yellow-400";
 
-  return (
-    <div className="rounded-xl border border-zinc-800 p-4">
+  const card = (
+    <div className={`rounded-xl border border-zinc-800 p-4 ${job.status === "COMPLETED" ? "hover:border-zinc-600 transition-colors cursor-pointer" : ""}`}>
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs text-zinc-500 font-mono">{job.job_id.slice(0, 8)}…</span>
         <span className={`text-xs font-medium ${statusColor}`}>
@@ -198,8 +198,16 @@ function JobCard({ job }: { job: JobStatus }) {
           ))}
         </div>
       )}
+      {job.status === "COMPLETED" && (
+        <p className="text-xs text-zinc-500 mt-3">Click to view full report →</p>
+      )}
     </div>
   );
+
+  if (job.status === "COMPLETED") {
+    return <a href={`/jobs/${job.job_id}`}>{card}</a>;
+  }
+  return card;
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
