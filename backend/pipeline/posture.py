@@ -55,9 +55,13 @@ def _get_pose_model() -> YOLO:
     global _pose_model
     if _pose_model is None:
         device = os.getenv("POSTURE_CUDA_DEVICE", None)
-        device_arg = device if device else None
-        print(f"[posture] loading pose model from {POSE_MODEL_PATH} (device={device_arg or 'auto'})")
-        _pose_model = YOLO(str(POSE_MODEL_PATH), task="pose", device=device_arg)
+        print(f"[posture] loading pose model from {POSE_MODEL_PATH} (device={device or 'default'})")
+        _pose_model = YOLO(str(POSE_MODEL_PATH), task="pose")
+        if device:
+            try:
+                _pose_model.to(device)
+            except Exception as e:
+                print(f"[posture] warning: failed to move pose model to {device}: {e}")
     return _pose_model
 
 
