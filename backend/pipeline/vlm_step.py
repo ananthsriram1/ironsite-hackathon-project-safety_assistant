@@ -37,8 +37,13 @@ ADAPTER_PATH   = os.getenv("VLM_ADAPTER_PATH",  "/workspace/models/adapter1")
 MAX_PIXELS          = int(os.getenv("VLM_MAX_PIXELS",          "100352"))  # per-frame ~317x317
 MAX_NEW_TOKENS      = int(os.getenv("VLM_MAX_NEW_TOKENS",       "1024"))   # pass-3 final JSON
 MAX_NEW_TOKENS_P1   = int(os.getenv("VLM_MAX_NEW_TOKENS_PASS1", "768"))    # pass-1 Jamie notes
-MAX_NEW_TOKENS_P2   = int(os.getenv("VLM_MAX_NEW_TOKENS_PASS2", "768"))    # pass-2 Marcus notes
+MAX_NEW_TOKENS_P2   = int(os.getenv("VLM_MAX_NEW_TOKENS_PASS2", "1024"))   # pass-2 Marcus notes
+MAX_ANNOTATED_FRAMES= int(os.getenv("VLM_MAX_ANNOTATED_FRAMES", "15"))     # cap to avoid context overflow
 VIDEO_FPS           = float(os.getenv("VLM_VIDEO_FPS",          "1.0"))    # frames/sec to sample
+MAX_HAZARD_FRAMES   = int(os.getenv("VLM_MAX_HAZARD_FRAMES",    "40"))     # cap text payload to VLM
+CHUNK_SECONDS       = float(os.getenv("VLM_CHUNK_SECONDS",      "60"))     # time window per VLM pass
+CHUNK_FRAMES        = int(os.getenv("VLM_CHUNK_FRAMES",         "0"))      # override seconds if >0
+VLM_GPU_ID          = os.getenv("VLM_GPU_ID")                                 # pin VLM to a specific GPU
 
 # ---------------------------------------------------------------------------
 # Model singleton — loaded once, shared across all inference calls
@@ -65,10 +70,11 @@ def _get_model():
     global _model, _processor
     if _model is None:
         print(f"[vlm] loading base model from {MODEL_ID} ...")
+        device_map = {"": f"cuda:{VLM_GPU_ID}"} if VLM_GPU_ID else "auto"
         _model = Qwen3VLForConditionalGeneration.from_pretrained(
             MODEL_ID,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            device_map=device_map,
         )
         adapter = Path(ADAPTER_PATH)
         if adapter.exists():
@@ -79,7 +85,7 @@ def _get_model():
             print(f"[vlm] no adapter found at {ADAPTER_PATH}, using base model")
             _processor = AutoProcessor.from_pretrained(MODEL_ID)
         _model.eval()
-        print("[vlm] model ready")
+        print(f"[vlm] model ready (device_map={device_map})")
     return _model, _processor
 
 
@@ -524,16 +530,24 @@ SOURCE 3 — YOLO + SAM DETECTION DATA:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RECONCILIATION RULES — apply before writing your final output:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  AGREEMENT (Jamie + you both flagged it, YOLO confirms) → high confidence, flag it.
-  SPLIT (Jamie flagged, you did not, or vice versa) → state why one source is more reliable.
-    Jamie saw the raw video — trust him on things visible only in motion or POV context.
-    You saw the annotated frames — trust yourself on machine-flagged spatial violations.
+  AGREEMENT (Jamie + you both flagged it, YOLO confirms) → flag it, high confidence.
+  SPLIT (Jamie flagged, you did not) → DO NOT automatically dismiss Jamie.
+    Jamie watched the raw video — he catches motion, behaviour, and momentary events
+    that annotated frames may not show. If Jamie flagged phone use, running, or a brief
+    PPE removal, treat it seriously even if you didn't note it independently.
+    Require a specific reason to overrule Jamie, not just absence of machine detection.
+  SPLIT (you flagged, Jamie did not) → flag it if machine evidence is strong (conf ≥ 0.60).
   MACHINE ONLY (YOLO flagged, neither observer noted it) → conf ≥ 0.70 = flag with note;
-    conf < 0.40 = discard unless you have a strong reason.
-  OBSERVER ONLY (Jamie or you flagged it, YOLO missed it) → flag if visually clear.
-    Machines miss things. Human observation of a clear violation is sufficient.
-  CONFLICT (Jamie said present, you said absent, or vice versa) → state your final ruling
-    and the reason. You are the CSO. Your word is final.
+    conf < 0.40 = discard.
+  OBSERVER ONLY (Jamie or you flagged it clearly, YOLO missed it) → flag it.
+    Machines miss things constantly. A clear human observation of a violation is sufficient.
+    Phone use, running, and behavioural violations are almost never caught by YOLO.
+  CONFLICT (Jamie said compliant, you said violation, or vice versa) → state your ruling
+    and the specific reason. Prioritise whichever observer had the clearer view of that
+    specific item (Jamie for behaviour/motion, you for spatial/PPE confirmed by machine).
+  ⚠ DO NOT write "no violations" if Jamie's notes contain specific flagged observations.
+    Engage with each one explicitly. Dismissing all machine detections as false positives
+    while ignoring Jamie's behavioural flags is not acceptable — explain each decision.
 
 {annotated_frame_note}
 
@@ -584,10 +598,19 @@ def _format_yolo_sam_data(hazard_frames: list[dict], summary: dict) -> str:
         lines.append("")
 
     if hazard_frames:
-        lines.append("  Flagged frame timestamps (with YOLO confidence scores):")
-        for frame in hazard_frames:
+        lines.append("  Flagged frame timestamps (capped for context):")
+
+        total = len(hazard_frames)
+        # Cap hazard frames to avoid prompt explosion; keep early signal dense, then sample.
+        if total > MAX_HAZARD_FRAMES:
+            step = total / MAX_HAZARD_FRAMES
+            sampled = [hazard_frames[int(i * step)] for i in range(MAX_HAZARD_FRAMES)]
+            lines.append(f"    showing {len(sampled)} of {total} frames (evenly sampled, cap={MAX_HAZARD_FRAMES})")
+        else:
+            sampled = hazard_frames
+
+        for frame in sampled:
             ts = frame["timestamp_seconds"]
-            # Include object confidences from raw detections for this frame
             det_by_class: dict = {}
             for d in frame.get("detections", []):
                 det_by_class.setdefault(d["class_name"], []).append(d["confidence"])
@@ -598,7 +621,6 @@ def _format_yolo_sam_data(hazard_frames: list[dict], summary: dict) -> str:
             for h in frame.get("hazards", []):
                 tid = h.get("track_id")
                 w = f"(worker #{tid})" if tid is not None else ""
-                # Pull the confidence of the objects driving this hazard
                 obj_confs = [
                     f"{o['class']}={o['confidence']:.2f}"
                     for o in h.get("objects", [])
@@ -609,6 +631,48 @@ def _format_yolo_sam_data(hazard_frames: list[dict], summary: dict) -> str:
             lines.append(f"             hazards: {', '.join(hazard_parts)}")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Chunking helpers — bound VLM context on long videos
+# ---------------------------------------------------------------------------
+
+def _chunk_hazard_frames(
+    hazard_frames: list[dict],
+    summary: dict,
+) -> list[list[dict]]:
+    """
+    Split hazard_frames into time windows so each VLM pass has bounded context.
+    Uses CHUNK_SECONDS by default or CHUNK_FRAMES if provided (>0).
+    """
+    if not hazard_frames:
+        return []
+
+    if CHUNK_FRAMES > 0:
+        size = max(1, CHUNK_FRAMES)
+        return [hazard_frames[i:i + size] for i in range(0, len(hazard_frames), size)]
+
+    fps = summary.get("video_fps", 25.0) or 25.0
+    window = max(1.0, CHUNK_SECONDS)
+
+    chunks: list[list[dict]] = []
+    current: list[dict] = []
+    start_ts = hazard_frames[0]["timestamp_seconds"]
+    cutoff = start_ts + window
+
+    for frame in hazard_frames:
+        ts = frame["timestamp_seconds"]
+        if ts < cutoff:
+            current.append(frame)
+        else:
+            if current:
+                chunks.append(current)
+            current = [frame]
+            start_ts = ts
+            cutoff = start_ts + window
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 # ---------------------------------------------------------------------------
@@ -828,15 +892,21 @@ def run_vlm_on_video(
     print(f"[vlm] video: {video_path} ({duration:.1f}s, {len(hazard_frames)} hazard frames, camera={cam_key})")
 
     # Collect annotated frames saved by the YOLO+SAM pipeline pass
+    # Cap and evenly sample to avoid overwhelming the model's context window
     frames_dir = job_dir / "frames"
-    annotated_paths: list[Path] = []
+    all_annotated: list[Path] = []
     for hf in hazard_frames:
         fp = hf.get("frame_path")
         if fp:
             full = frames_dir / fp
             if full.exists():
-                annotated_paths.append(full)
-    print(f"[vlm] {len(annotated_paths)} annotated frames available")
+                all_annotated.append(full)
+    if len(all_annotated) > MAX_ANNOTATED_FRAMES:
+        step = len(all_annotated) / MAX_ANNOTATED_FRAMES
+        annotated_paths = [all_annotated[int(i * step)] for i in range(MAX_ANNOTATED_FRAMES)]
+    else:
+        annotated_paths = all_annotated
+    print(f"[vlm] {len(all_annotated)} annotated frames total, using {len(annotated_paths)} (evenly sampled, cap={MAX_ANNOTATED_FRAMES})")
 
     # ── Pass 1: Jamie — fresh eyes on raw video ───────────────────────────────
     pass1_notes = _run_pass1(video_path, duration, cam_key, model, processor)
@@ -876,58 +946,69 @@ def assess_all_events(
         out_file.write_text("[]")
         return []
 
-    print(f"[vlm] running full-video assessment ({len(hazard_frames)} hazard frames from YOLO, {VIDEO_FPS}fps sample — VLM always runs)")
+    print(f"[vlm] running VLM assessment ({len(hazard_frames)} hazard frames from YOLO, {VIDEO_FPS}fps sample — chunked if long)")
 
-    annotated_paths: list[Path] = []
-    try:
-        assessment, annotated_paths = run_vlm_on_video(video_path, hazard_frames, job_dir, summary or {}, camera_source)
-    except Exception as exc:
-        err_str = str(exc)
-        if "ECC" in err_str or "uncorrectable" in err_str or "AcceleratorError" in err_str:
-            print(f"[vlm] ECC error — resetting model and retrying ...")
-            _reset_model()
-            try:
-                assessment, annotated_paths = run_vlm_on_video(video_path, hazard_frames, job_dir, summary or {}, camera_source)
-            except Exception as retry_exc:
-                print(f"[vlm] retry failed: {retry_exc}")
-                out_file.write_text("[]")
-                return []
-        else:
-            print(f"[vlm] error: {exc}")
-            out_file.write_text("[]")
-            return []
+    chunks = _chunk_hazard_frames(hazard_frames, summary or {})
+    if not chunks:
+        out_file.write_text("[]")
+        return []
 
     _s = summary or {}
     _total_frames = _s.get("total_frames", 0)
     _video_fps    = _s.get("video_fps", 25.0)
     _fallback_dur = round(_total_frames / max(_video_fps, 1), 1)
 
-    # Resolve each hazard's best_frame_index to an actual filename
-    assessment_dict = assessment.model_dump()
-    for hazard in assessment_dict["hazards"]:
-        idx = hazard.get("best_frame_index")
-        if idx is not None and 0 <= idx < len(annotated_paths):
-            hazard["best_frame_path"] = annotated_paths[idx].name
-            print(f"[vlm] hazard '{hazard['violation_type']}' best frame: index={idx}, file={hazard['best_frame_path']}")
-        else:
-            hazard["best_frame_path"] = None
+    results: list[dict] = []
 
-    first = hazard_frames[0] if hazard_frames else {}
-    result = [{
-        "event": {
-            "start_ts":                  hazard_frames[0]["timestamp_seconds"] if hazard_frames else 0.0,
-            "end_ts":                    hazard_frames[-1]["timestamp_seconds"] if hazard_frames else _fallback_dur,
-            "duration_seconds":          round(hazard_frames[-1]["timestamp_seconds"] - hazard_frames[0]["timestamp_seconds"], 3) if hazard_frames else _fallback_dur,
-            "frame_count":               len(hazard_frames),
-            "peak_yolo_severity":        "HIGH" if hazard_frames else "NONE",
-            "yolo_hazard_types":         list({h["hazard_type"] for f in hazard_frames for h in f.get("hazards", [])}),
-            "representative_frame_path": first.get("frame_path"),
-            "representative_timestamp":  first.get("timestamp_seconds", 0.0),
-        },
-        "vlm":   assessment_dict,
-        "error": None,
-    }]
+    for idx, chunk in enumerate(chunks):
+        print(f"[vlm] chunk {idx+1}/{len(chunks)} — {len(chunk)} hazard frames")
+        try:
+            assessment, annotated_paths = run_vlm_on_video(video_path, chunk, job_dir, summary or {}, camera_source)
+        except Exception as exc:
+            err_str = str(exc)
+            if "ECC" in err_str or "uncorrectable" in err_str or "AcceleratorError" in err_str:
+                print(f"[vlm] ECC error in chunk {idx} — resetting model and retrying ...")
+                _reset_model()
+                try:
+                    assessment, annotated_paths = run_vlm_on_video(video_path, chunk, job_dir, summary or {}, camera_source)
+                except Exception as retry_exc:
+                    print(f"[vlm] retry failed in chunk {idx}: {retry_exc}")
+                    results.append({"event": None, "vlm": None, "error": str(retry_exc), "chunk_index": idx})
+                    continue
+            else:
+                print(f"[vlm] error in chunk {idx}: {exc}")
+                results.append({"event": None, "vlm": None, "error": str(exc), "chunk_index": idx})
+                continue
 
-    out_file.write_text(json.dumps(result, indent=2))
-    print(f"[vlm] done — {len(assessment.hazards)} hazards identified across full video")
-    return result
+        # Resolve each hazard's best_frame_index to an actual filename (chunk-local)
+        assessment_dict = assessment.model_dump()
+        for hazard in assessment_dict["hazards"]:
+            idx_frame = hazard.get("best_frame_index")
+            if idx_frame is not None and 0 <= idx_frame < len(annotated_paths):
+                hazard["best_frame_path"] = annotated_paths[idx_frame].name
+                print(f"[vlm] chunk {idx} hazard '{hazard['violation_type']}' best frame: index={idx_frame}, file={hazard['best_frame_path']}")
+            else:
+                hazard["best_frame_path"] = None
+
+        first = chunk[0]
+        last  = chunk[-1]
+        results.append({
+            "event": {
+                "start_ts":                  first["timestamp_seconds"],
+                "end_ts":                    last["timestamp_seconds"],
+                "duration_seconds":          round(last["timestamp_seconds"] - first["timestamp_seconds"], 3),
+                "frame_count":               len(chunk),
+                "peak_yolo_severity":        "HIGH",
+                "yolo_hazard_types":         list({h["hazard_type"] for f in chunk for h in f.get("hazards", [])}),
+                "representative_frame_path": first.get("frame_path"),
+                "representative_timestamp":  first.get("timestamp_seconds", 0.0),
+                "chunk_index":               idx,
+            },
+            "vlm":   assessment_dict,
+            "error": None,
+        })
+
+    out_file.write_text(json.dumps(results, indent=2))
+    total_hazards = sum(len(r.get("vlm", {}).get("hazards", [])) for r in results if r.get("vlm"))
+    print(f"[vlm] done — {total_hazards} hazards identified across {len(results)} chunk(s)")
+    return results

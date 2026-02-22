@@ -22,5 +22,11 @@ fi
 # SAM3 and Qwen3-VL are preloaded at /workspace/models/ on this instance
 
 echo ""
-echo "Setup complete. To start the server:"
-echo "source venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,3 uvicorn main:app --host 0.0.0.0 "
+echo "Setup complete. To start the server (GPU2 excluded):"
+echo "source venv/bin/activate && \\"
+echo "CUDA_VISIBLE_DEVICES=0,1,3 \\"
+echo "VLM_GPU_ID=1 \\"
+echo "VLM_CHUNK_SECONDS=60 \\"
+echo "VLM_MAX_HAZARD_FRAMES=40 \\"
+echo "VLM_VIDEO_FPS=0.5 \\"
+echo "uvicorn main:app --host 0.0.0.0 --port 8000"
