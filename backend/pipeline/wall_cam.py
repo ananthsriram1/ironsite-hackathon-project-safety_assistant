@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image
 from ultralytics import YOLO, SAM
 
-# from pipeline.vlm_step import assess_all_events
+from pipeline.vlm_step import assess_all_events
 
 # ---------------------------------------------------------------------------
 # GPU optimisations (no-op on CPU)
@@ -440,10 +440,8 @@ def run_wall_cam_pipeline(
 
     (job_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
-    # VLM step — disabled for now
-    # print("[pipeline] starting VLM assessment pass")
-    # vlm_results = assess_all_events(hazard_events, job_dir, gap_seconds=3.0)
-    # summary["vlm_events_assessed"] = len(vlm_results)
-    vlm_results = []
+    print("[pipeline] starting VLM assessment pass")
+    vlm_results = assess_all_events(hazard_events, job_dir, gap_seconds=3.0)
+    summary["vlm_events_assessed"] = len(vlm_results)
 
     return summary, hazard_events, vlm_results
