@@ -27,17 +27,17 @@ from pipeline.vlm_step import run_vlm_on_video
 POSE_MODEL_PATH = Path(os.getenv("POSE_MODEL_PATH", "/workspace/models/yolo26l-pose.pt"))
 DEFAULT_FPS = 25.0
 MIN_CONF = 0.35
-MIN_RISK_CONFIDENCE = 0.55
-MIN_OVERREACH_CONFIDENCE = 0.55
-TRUNK_GOOD_MAX_DEG = 28
+MIN_RISK_CONFIDENCE = 0.65        # raised: only flag when keypoints are reliable
+MIN_OVERREACH_CONFIDENCE = 0.65   # raised: arm angle noise is high at low confidence
+TRUNK_GOOD_MAX_DEG = 38           # raised: normal working forward lean up to ~38° is fine
 TRUNK_DEG_KNEELING = 20
-KNEE_ANGLE_SQUAT_DEG = 105
-TRUNK_DEG_AWKWARD = 38
-TRUNK_DEG_MSD_HIGH = 58
-ARM_RAISE_OVERREACH_DEG = 52
-ARM_RAISE_MAX_OVERREACH_DEG = 102
-COMBINED_BORDERLINE = 2
-GOOD_REQUIRES_CONFIDENCE = 0.50
+KNEE_ANGLE_SQUAT_DEG = 100        # slightly tighter squat angle
+TRUNK_DEG_AWKWARD = 48            # raised: genuinely awkward posture starts at ~48°
+TRUNK_DEG_MSD_HIGH = 65           # raised: MSD high-risk requires more extreme flexion
+ARM_RAISE_OVERREACH_DEG = 65      # raised: shoulder-height arm raise, not just 52°
+ARM_RAISE_MAX_OVERREACH_DEG = 110
+COMBINED_BORDERLINE = 3           # raised: require REBA score ≥ 3 to enter risk territory
+GOOD_REQUIRES_CONFIDENCE = 0.60   # raised: require higher confidence to mark as "good"
 
 # COCO 17 keypoint indices
 NOSE, L_EYE, R_EYE, L_EAR, R_EAR = 0, 1, 2, 3, 4
@@ -55,9 +55,13 @@ def _get_pose_model() -> YOLO:
     global _pose_model
     if _pose_model is None:
         device = os.getenv("POSTURE_CUDA_DEVICE", None)
-        device_arg = device if device else None
-        print(f"[posture] loading pose model from {POSE_MODEL_PATH} (device={device_arg or 'auto'})")
-        _pose_model = YOLO(str(POSE_MODEL_PATH), task="pose", device=device_arg)
+        print(f"[posture] loading pose model from {POSE_MODEL_PATH} (device={device or 'default'})")
+        _pose_model = YOLO(str(POSE_MODEL_PATH), task="pose")
+        if device:
+            try:
+                _pose_model.to(device)
+            except Exception as e:
+                print(f"[posture] warning: failed to move pose model to {device}: {e}")
     return _pose_model
 
 

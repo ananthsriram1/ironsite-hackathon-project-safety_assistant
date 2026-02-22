@@ -62,10 +62,23 @@ type Shift = {
   events: Event[];
 };
 
+type JobResults = {
+  summary: JobStatus["summary"];
+  vlm_results: any[];
+  posture_summary?: {
+    events?: number;
+    frames_sampled?: number;
+    total_frames?: number;
+  };
+  posture_events?: any[];
+  posture_vlm?: any[];
+};
+
 export default function JobDetailPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const [job, setJob] = useState<JobStatus | null>(null);
   const [shift, setShift] = useState<Shift | null>(null);
+  const [results, setResults] = useState<JobResults | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [polling, setPolling] = useState<NodeJS.Timer | null>(null);
@@ -79,6 +92,8 @@ export default function JobDetailPage() {
       if (j.status === "COMPLETED" && j.shift_id) {
         const sr = await fetch(`${BASE}/shifts/${j.shift_id}`);
         if (sr.ok) setShift(await sr.json());
+        const rr = await fetch(`${BASE}/jobs/${jobId}/results`);
+        if (rr.ok) setResults(await rr.json());
       }
       setLoading(false);
     }
@@ -111,6 +126,7 @@ export default function JobDetailPage() {
   }
 
   const summary = job.summary;
+  const resultSummary = results?.summary ?? summary;
   const progress = job.progress ?? (job.status === "COMPLETED" ? 1 : 0);
   const stage = job.stage ?? (job.status === "COMPLETED" ? "completed" : job.status.toLowerCase());
 
@@ -165,20 +181,96 @@ export default function JobDetailPage() {
         </div>
       )}
 
+      {/* Posture Analysis */}
+      {results?.posture_summary && (
+        <div className="card">
+          <div className="card-head">
+            <span className="card-label">Posture Analysis</span>
+            <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+              REBA-inspired ergonomic risk
+            </span>
+          </div>
+
+          {/* Stats row */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1px", background: "var(--border)", borderRadius: "6px", overflow: "hidden", marginBottom: "16px" }}>
+            {[
+              { label: "Risk Frames", value: results.posture_summary.events ?? 0, color: (results.posture_summary.events ?? 0) > 0 ? "var(--red)" : "var(--emerald)" },
+              { label: "Frames Sampled", value: results.posture_summary.frames_sampled ?? "—", color: "var(--text)" },
+              { label: "Total Frames", value: results.posture_summary.total_frames ?? "—", color: "var(--text-muted)" },
+            ].map(({ label, value, color }) => (
+              <div key={label} style={{ background: "var(--surface-2)", padding: "12px 16px" }}>
+                <div style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.1em", color: "var(--text-dim)", marginBottom: "6px" }}>{label.toUpperCase()}</div>
+                <div style={{ fontSize: "22px", fontWeight: 800, fontFamily: "var(--font-mono)", color, letterSpacing: "-0.02em", lineHeight: 1 }}>{value}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* VLM hazards */}
+          {results.posture_vlm && results.posture_vlm.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <div style={{ fontSize: "9px", fontFamily: "var(--font-mono)", letterSpacing: "0.1em", color: "var(--text-dim)" }}>
+                VLM FINDINGS · {results.posture_vlm.reduce((a: number, c: any) => a + (c.vlm?.hazards?.length ?? 0), 0)} total
+              </div>
+              {results.posture_vlm.flatMap((chunk: any, idx: number) =>
+                (chunk.vlm?.hazards ?? []).map((hz: any, i: number) => {
+                  const frame = hz.best_frame_path || chunk.event?.representative_frame_path;
+                  const ts = chunk.event?.representative_timestamp ?? chunk.event?.start_ts ?? 0;
+                  return (
+                    <div key={`${idx}-${i}`} style={{
+                      display: "grid",
+                      gridTemplateColumns: frame ? "1fr 160px" : "1fr",
+                      gap: "14px",
+                      background: "var(--surface-2)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "8px",
+                      padding: "14px",
+                      alignItems: "start",
+                    }}>
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+                          <span className="pill">{hz.violation_type?.replace(/_/g, " ")}</span>
+                          <span className="pill-soft">{hz.severity}</span>
+                          <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>t={ts.toFixed(1)}s</span>
+                        </div>
+                        {hz.explanation && (
+                          <p style={{ fontSize: "12px", color: "var(--text-muted)", margin: "0 0 8px", lineHeight: 1.6 }}>{hz.explanation}</p>
+                        )}
+                        {hz.recommendation && (
+                          <div style={{ fontSize: "11px", color: "var(--accent)", fontFamily: "var(--font-mono)", borderLeft: "2px solid var(--accent-dark)", paddingLeft: "8px" }}>
+                            {hz.recommendation}
+                          </div>
+                        )}
+                      </div>
+                      {frame && (
+                        <img
+                          src={`${BASE}/jobs/${jobId}/frames/${frame}`}
+                          alt="posture frame"
+                          style={{ width: "100%", borderRadius: "6px", border: "1px solid var(--border)", display: "block" }}
+                        />
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Summary stats */}
-      {summary && (
+      {resultSummary && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px" }}>
           <div className="stat-card" style={{ borderLeftColor: "var(--blue)" }}>
             <div className="stat-label">Frames Processed</div>
-            <div className="stat-value" style={{ fontSize: "28px" }}>{summary.frames_processed}</div>
+            <div className="stat-value" style={{ fontSize: "28px" }}>{resultSummary.frames_processed}</div>
           </div>
           <div className="stat-card" style={{ borderLeftColor: "var(--amber)" }}>
             <div className="stat-label">Hazard Frames</div>
-            <div className="stat-value" style={{ fontSize: "28px", color: "var(--amber)" }}>{summary.frames_with_hazards}</div>
+            <div className="stat-value" style={{ fontSize: "28px", color: "var(--amber)" }}>{resultSummary.frames_with_hazards}</div>
           </div>
           <div className="stat-card" style={{ borderLeftColor: "var(--accent)" }}>
             <div className="stat-label">Workers Tracked</div>
-            <div className="stat-value" style={{ fontSize: "28px" }}>{summary.workers_tracked}</div>
+            <div className="stat-value" style={{ fontSize: "28px" }}>{resultSummary.workers_tracked}</div>
           </div>
           <div className="stat-card" style={{ borderLeftColor: "var(--emerald)" }}>
             <div className="stat-label">Events Written</div>
@@ -188,16 +280,16 @@ export default function JobDetailPage() {
       )}
 
       {/* Hazard breakdown */}
-      {summary && Object.keys(summary.hazard_counts).length > 0 && (
+      {resultSummary && Object.keys(resultSummary.hazard_counts).length > 0 && (
         <div className="card">
           <div className="card-head">
             <span className="card-label">Hazard Breakdown</span>
             <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
-              {Object.values(summary.hazard_counts).reduce((a, b) => a + b, 0)} total detections
+              {Object.values(resultSummary.hazard_counts).reduce((a, b) => a + b, 0)} total detections
             </span>
           </div>
           <div className="card-body" style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-            {Object.entries(summary.hazard_counts).map(([k, v]) => (
+            {Object.entries(resultSummary.hazard_counts).map(([k, v]) => (
               <div key={k} style={{
                 display: "flex",
                 alignItems: "center",
@@ -216,13 +308,13 @@ export default function JobDetailPage() {
       )}
 
       {/* Worker PPE compliance */}
-      {summary && Object.keys(summary.worker_compliance ?? {}).length > 0 && (
+      {resultSummary && Object.keys(resultSummary.worker_compliance ?? {}).length > 0 && (
         <div className="card">
           <div className="card-head">
             <span className="card-label">PPE Compliance</span>
           </div>
           <div>
-            {Object.entries(summary.worker_compliance).map(([tid, c], i, arr) => (
+            {Object.entries(resultSummary.worker_compliance).map(([tid, c], i, arr) => (
               <div key={tid} style={{
                 display: "flex",
                 alignItems: "center",

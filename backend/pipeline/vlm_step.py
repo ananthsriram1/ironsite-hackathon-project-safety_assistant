@@ -330,13 +330,48 @@ to see clearly.
     with cones/barriers.""",
 
     "POSTURE": """\
-CAMERA TYPE: POSTURE ANALYSIS (pose model feed)
-  • Focus on body mechanics: trunk flexion, arm elevation/overreach, squatting/kneeling.
-  • Hazards emitted by upstream posture model include: OVERREACH, AWKWARD_POSTURE,
-    MSD_HIGH_RISK, KNEELING_SQUATTING_LOW. Treat these as ergonomic violations.
-  • You are NOT checking PPE here unless it is clearly relevant to the posture hazard.
-  • Use the annotated frames and timestamps to confirm the risky posture; ignore frames
-    where keypoints are low-confidence or occluded.""",
+CAMERA TYPE: POSTURE ANALYSIS (ergonomic risk screening feed)
+  The upstream REBA-inspired pose model has pre-flagged these frames as potential ergonomic
+  risks. Your job is to ACT AS A FILTER — reject false positives, confirm only genuine,
+  sustained risks. Be skeptical. The pose model over-flags by design; you are the quality gate.
+
+  ─── REJECT THE FLAG (do NOT report a hazard) if ANY of these apply ───
+  • Transitional posture: the worker is momentarily bending, reaching, or turning as part
+    of normal movement — e.g., picking something up, stepping over an obstacle, turning to
+    look at something. If the posture is brief (< 2 seconds based on frame timestamps) it
+    is NOT a violation.
+  • Bad skeleton: the keypoint overlay clearly does not match the worker's actual body —
+    limbs crossing, impossible joint angles, or skeleton attached to the wrong person.
+    Unreliable angle data = discard the flag entirely.
+  • Task-appropriate posture: the worker is crouching to inspect ground-level work,
+    kneeling to lay cables, leaning forward to operate a ground tool. Brief or
+    task-appropriate postures in context are not MSD risks.
+  • Isolated single frame: only one frame shows the posture with no nearby corroborating
+    frames. A single-frame anomaly is almost always a transient pose or skeleton error.
+  • Ambiguous or unclear: you cannot confidently determine what posture the worker is in.
+    If you are not sure, do not flag it.
+
+  ─── CONFIRM THE HAZARD only if ALL of these are true ───
+  • SUSTAINED: the posture appears across multiple frames or is visibly held for ≥ 3
+    seconds. Use the timestamps provided to judge duration.
+  • CLEAR: you can unambiguously see the risky body position — extreme trunk flexion,
+    arm well above shoulder height with body twisted, or deep squat with severe forward lean.
+  • WORKING IN THAT POSITION: the worker is actively doing a task in that posture, not
+    transitioning through it.
+
+  ─── HAZARD TYPE DEFINITIONS (use only these, and only when confirmed above) ───
+  • OVERREACH — arm raised clearly above shoulder height while body is twisted or
+    unsupported. Must be sustained. A normal overhead reach or swing does NOT qualify.
+  • AWKWARD_POSTURE — trunk visibly and significantly flexed forward (well over 45°) and
+    the worker is working in that position, not just bending momentarily.
+  • MSD_HIGH_RISK — severe combined posture: extreme trunk flexion (visually >60°) with
+    apparent load or repetitive motion context. Reserve for genuinely alarming postures.
+  • KNEELING_SQUATTING_LOW — deep knee bend combined with significant forward trunk lean,
+    repeated or held across multiple frames.
+
+  DO NOT flag PPE issues here — that is handled by the main safety pipeline.
+  DO NOT flag a posture just because the REBA model scored it — your visual confirmation
+  and the duration check are the final authority.""",
 }
 
 # ---------------------------------------------------------------------------
