@@ -140,22 +140,28 @@ At the end of a shift, the dashboard generates a per-worker report:
 
 ## Running the Application
 
-No cloud credentials needed. Everything runs locally.
+**Prerequisites:** Python 3.10+, [Bun](https://bun.sh), a GPU instance with CUDA (tested on 4× RTX PRO 6000 Blackwell)
 
-**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) + [Bun](https://bun.sh)
+**Model weights required** (not committed — place before running):
+- `backend/models/last.pt` — fine-tuned YOLO11 PPE detector
+- `/workspace/models/sam3.pt` — SAM3 segmentation model
+- `/workspace/models/qwen3-vl` — Qwen3-VL-8B-Instruct base model
+- `/workspace/models/adapter1` — fine-tuned LoRA adapter (optional, used if present)
 
-```bash
-# one-time setup
-cp code/.env.example code/.env.local
-```
-
-**Terminal 1 — backend (API + ML + database):**
+**Terminal 1 — backend (one-time setup):**
 ```bash
 cd backend
-docker compose up
+bash setup.sh
 ```
 
-Starts FastAPI at `http://localhost:8000` with a SQLite database. Edits to backend files hot-reload automatically.
+**Terminal 1 — backend (start server):**
+```bash
+cd backend
+source venv/bin/activate
+CUDA_VISIBLE_DEVICES=0,1,3 uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Starts FastAPI at `http://localhost:8000` with a SQLite database.
 
 Confirm it's up: `GET http://localhost:8000/health` → `{ "status": "ok" }`
 
