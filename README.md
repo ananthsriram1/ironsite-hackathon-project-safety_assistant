@@ -20,68 +20,6 @@ The core gap: no affordable, passive, continuous monitoring system exists that c
 
 Our approach processes video at the end of a shift rather than in real-time, making it practical to deploy on commodity hardware. Users can choose to feed the system either **POV body-worn cameras** (posture and PPE on first-person footage) or **fixed wall-mounted cameras** (site-wide ergonomic and PPE analysis). Both posture and PPE analysis use the **same three-stage pipeline**: **Stage 1 — Primary detection** (fine-tuned YOLO) → **Stage 2 — Refinement & deduplication** (SAM 3) → **Stage 3 — Compliance verification & hallucination control** (fine-tuned Qwen3 VL 8B Instruct). YOLO produces initial bounding boxes and labels; SAM 3 refines masks, tags workers, and deduplicates; the VLM validates outputs with method prompting, chain-of-thought, and referential loops to enforce OSHA and reduce hallucination. See [Architecture (three-stage pipeline)](#architecture-three-stage-pipeline) below for the detailed flow.
 
----
-
-### Data Source 1 — POV (Body-Worn Cameras)
-
-**Research basis:** [CWPV Dataset](https://figshare.com/articles/dataset/CWPV_A_Working_Postures_of_the_Construction_Working_Postures_Videos_dataset/27907818)
-
-Workers wear cameras that capture first-person footage of their tasks throughout the shift. In our setup, POV footage is processed by the **posture** and **PPE** timestamp scripts (`analyze_pov_posture_timestamps.py`, `analyze_pov_ppe_timestamps.py`) and can feed the same three-stage pipeline (YOLO → SAM 3 → VLM) where integrated. This footage is used for musculoskeletal and ergonomic analysis:
-
-- Pose estimation on first-person video to extract joint angles and body mechanics
-- Detection of high-risk postures — improper lifting, sustained bending, overreach
-- MSD (musculoskeletal disorder) risk scoring per worker per shift
-- Flagging repetitive strain patterns over time
-
-```
-POV footage (per worker)
-        │
-        ▼
-  Pose Estimation
-  (joint angles, body mechanics)
-        │
-        ▼
-  Ergonomic Risk Scoring
-  (MSD risk, posture violations)
-        │
-        ▼
-  Per-worker posture event log
-```
-
----
-
-### Data Source 2 — Fixed Wall-Mounted Cameras
-
-**Research basis:** [PMC11367630](https://pmc.ncbi.nlm.nih.gov/articles/PMC11367630/)
-
-Stationary IP cameras mounted around the site (~4m height, 1920×1080 at 24fps) provide a persistent spatial view of the work environment. In the backend, **wall-cam** video runs the full YOLO + SAM3 + VLM pipeline (`wall_cam.py` → `vlm_step.assess_all_events`) for PPE and behavioral hazards. This footage is processed for:
-
-- Worker detection and re-identification across camera angles and occlusions
-- Zone mapping — who enters restricted or hazard areas
-- Proximity detection — workers too close to machinery, edges, or moving equipment
-- PPE detection — presence/absence of helmets, vests, eye protection
-- Behavioral classification — safe vs. unsafe actions (unauthorized interventions, improper walkway use, etc.)
-
-```
-Wall-cam footage (site-wide)
-        │
-        ▼
-  Person Detection + Re-ID
-  (persistent worker identity across frames)
-        │
-        ▼
-  Spatial Reasoning
-  (zone mapping, proximity, occupancy)
-        │
-        ▼
-  Behavioral Classification
-  (PPE, safe/unsafe actions)
-        │
-        ▼
-  Per-worker spatial + behavioral event log
-```
-
----
 
 ### Worker Tagging & Object Permanence
 
