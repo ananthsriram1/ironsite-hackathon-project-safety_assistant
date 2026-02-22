@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -81,32 +81,44 @@ export default function JobDetailPage() {
   const [results, setResults] = useState<JobResults | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [polling, setPolling] = useState<NodeJS.Timer | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function loadOnce() {
-      const res = await fetch(`${BASE}/jobs/${jobId}`);
-      if (!res.ok) { setLoading(false); return; }
-      const j: JobStatus = await res.json();
-      setJob(j);
-      if (j.status === "COMPLETED" && j.shift_id) {
-        const sr = await fetch(`${BASE}/shifts/${j.shift_id}`);
-        if (sr.ok) setShift(await sr.json());
-        const rr = await fetch(`${BASE}/jobs/${jobId}/results`);
-        if (rr.ok) setResults(await rr.json());
+      try {
+        const res = await fetch(`${BASE}/jobs/${jobId}`);
+        if (!res.ok || cancelled) { setLoading(false); return; }
+        const j: JobStatus = await res.json();
+        if (cancelled) return;
+        setJob(j);
+
+        if (j.status === "COMPLETED" && j.shift_id) {
+          const [sr, rr] = await Promise.all([
+            fetch(`${BASE}/shifts/${j.shift_id}`),
+            fetch(`${BASE}/jobs/${jobId}/results`),
+          ]);
+          if (cancelled) return;
+          if (sr.ok) setShift(await sr.json());
+          if (rr.ok) setResults(await rr.json());
+        }
+
+        // stop polling once terminal
+        if (j.status === "COMPLETED" || j.status === "FAILED") {
+          if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      setLoading(false);
     }
 
-    // initial fetch
     loadOnce();
+    timerRef.current = setInterval(loadOnce, 1500);
 
-    // poll until done
-    const timer = setInterval(loadOnce, 2000);
-    setPolling(timer);
     return () => {
-      clearInterval(timer);
-      setPolling(null);
+      cancelled = true;
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     };
   }, [jobId]);
 
