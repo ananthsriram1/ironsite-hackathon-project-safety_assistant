@@ -1,0 +1,75 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{bls2023}
+\citation{osha2024}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\citation{fang2018}
+\citation{nath2020}
+\citation{hignett2000}
+\citation{yan2017}
+\citation{wang2022}
+\citation{kirillov2023}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}System Architecture}{2}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Stage 1: Primary Detection (Fine-tuned YOLO)}{2}{subsection.3.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces YOLO class mapping for wall-cam detection.\relax }}{2}{table.caption.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Stage 2: Refinement and Deduplication (SAM\nobreakspace  {}3)}{2}{subsection.3.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Three-stage pipeline architecture shared by both posture/ergonomics and PPE violation detection. Video frames pass through YOLO detection, SAM\nobreakspace  {}3 refinement, and adversarial VLM verification to produce compliance-checked safety events.\relax }}{3}{figure.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:pipeline}{{1}{3}{Three-stage pipeline architecture shared by both posture/ergonomics and PPE violation detection. Video frames pass through YOLO detection, SAM~3 refinement, and adversarial VLM verification to produce compliance-checked safety events.\relax }{figure.caption.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Three-stage pipeline: components, roles, and outputs.\relax }}{3}{table.caption.2}\protected@file@percent }
+\newlabel{tab:pipeline}{{1}{3}{Three-stage pipeline: components, roles, and outputs.\relax }{table.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Stage 3: Compliance Verification (Qwen3-VL-8B-Instruct)}{3}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.1}Confidence Calibration}{3}{subsubsection.3.3.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Confidence calibration bands for VLM priors.\relax }}{3}{table.caption.4}\protected@file@percent }
+\citation{hignett2000}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Posture and Ergonomic Analysis}{4}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Joint Angle Extraction}{4}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}REBA-Inspired Risk Scoring}{4}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Violation Classification}{4}{subsection.4.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Posture violation classification thresholds.\relax }}{4}{table.caption.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Worker Identity and Object Permanence}{4}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}OSHA Violation Coverage}{5}{section.6}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces OSHA violation coverage by detection modality.\relax }}{5}{table.caption.6}\protected@file@percent }
+\newlabel{tab:osha}{{5}{5}{OSHA violation coverage by detection modality.\relax }{table.caption.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}System Implementation}{5}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Backend}{5}{subsection.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Frontend Dashboard}{5}{subsection.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Infrastructure}{5}{subsection.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Data and Datasets}{5}{section.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {9}Results and Discussion}{6}{section.9}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces PPE detection results. (a)\nobreakspace  {}Worker building a concrete block wall; system identifies the high-visibility vest and labels the worker as compliant. (b)\nobreakspace  {}POV frame; system flags an exposed hand with a red bounding box for missing hand protection.\relax }}{6}{figure.caption.7}\protected@file@percent }
+\newlabel{fig:ppe}{{2}{6}{PPE detection results. (a)~Worker building a concrete block wall; system identifies the high-visibility vest and labels the worker as compliant. (b)~POV frame; system flags an exposed hand with a red bounding box for missing hand protection.\relax }{figure.caption.7}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Posture analysis results. (a)\nobreakspace  {}Worker segmented with blue mask and green bounding box; pose and PPE assessed as compliant. (b)\nobreakspace  {}Worker segmented with red box; elevated arm classified as OVERREACH with risk level\nobreakspace  {}3 for musculoskeletal strain.\relax }}{6}{figure.caption.8}\protected@file@percent }
+\newlabel{fig:posture}{{3}{6}{Posture analysis results. (a)~Worker segmented with blue mask and green bounding box; pose and PPE assessed as compliant. (b)~Worker segmented with red box; elevated arm classified as OVERREACH with risk level~3 for musculoskeletal strain.\relax }{figure.caption.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}Limitations}{6}{subsection.9.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {10}Challenges}{6}{section.10}\protected@file@percent }
+\bibcite{bls2023}{1}
+\bibcite{osha2024}{2}
+\bibcite{fang2018}{3}
+\bibcite{nath2020}{4}
+\bibcite{hignett2000}{5}
+\bibcite{yan2017}{6}
+\bibcite{wang2022}{7}
+\bibcite{kirillov2023}{8}
+\bibcite{onal2024}{9}
+\bibcite{cwpv2024}{10}
+\@writefile{toc}{\contentsline {section}{\numberline {11}Future Work}{7}{section.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {12}Conclusion}{7}{section.12}\protected@file@percent }
+\gdef \@abspage@last{7}

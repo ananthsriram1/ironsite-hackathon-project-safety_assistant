@@ -100,3 +100,7 @@ temp/
 *.tmp
 *.temp
 *.orig
+
+# Large model artifacts
+finetune/trained-adapters/
+*.safetensors
